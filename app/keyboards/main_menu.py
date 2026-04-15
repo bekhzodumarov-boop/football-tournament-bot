@@ -16,6 +16,9 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="ℹ️ Мой профиль", callback_data="my_profile"),
     )
     builder.row(
+        InlineKeyboardButton(text="🏆 Таблица турнира", callback_data="tournament_standings"),
+    )
+    builder.row(
         InlineKeyboardButton(text="📜 Регламент турнира", callback_data="reglament"),
     )
     return builder.as_markup()

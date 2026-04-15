@@ -2,10 +2,15 @@ from aiogram import Router
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database.models import Player, POSITION_LABELS
+from app.database.models import (
+    Player, POSITION_LABELS,
+    GameDay, GameDayStatus, Match, MatchStatus, Team,
+)
 from app.keyboards.main_menu import main_menu_kb, admin_menu_kb
 from app.data.reglament import REGLAMENT_PART1, REGLAMENT_PART2
 
@@ -221,3 +226,104 @@ async def cb_my_stats(call: CallbackQuery, player: Player | None, session: Async
         f"⭐ Рейтинг: <b>{player.rating:.1f}</b>\n"
     )
     await call.message.edit_text(text, reply_markup=main_menu_kb())
+
+
+@router.callback_query(lambda c: c.data == "tournament_standings")
+async def cb_tournament_standings(call: CallbackQuery, session: AsyncSession):
+    await call.answer()
+
+    # Найти активный или последний игровой день
+    result = await session.execute(
+        select(GameDay)
+        .where(GameDay.status.in_([
+            GameDayStatus.ANNOUNCED,
+            GameDayStatus.CLOSED,
+            GameDayStatus.IN_PROGRESS,
+            GameDayStatus.FINISHED,
+        ]))
+        .order_by(GameDay.scheduled_at.desc())
+        .limit(1)
+    )
+    game_day = result.scalar_one_or_none()
+
+    if not game_day:
+        await call.message.edit_text(
+            "🏆 <b>Таблица турнира</b>\n\nДанных пока нет.",
+            reply_markup=main_menu_kb()
+        )
+        return
+
+    # Подсчёт очков из завершённых матчей
+    matches_result = await session.execute(
+        select(Match)
+        .options(selectinload(Match.team_home), selectinload(Match.team_away))
+        .where(Match.game_day_id == game_day.id, Match.status == MatchStatus.FINISHED)
+    )
+    matches = matches_result.scalars().all()
+
+    stats: dict[int, dict] = {}
+    for match in matches:
+        for team, gf, ga in [
+            (match.team_home, match.score_home, match.score_away),
+            (match.team_away, match.score_away, match.score_home),
+        ]:
+            if team.id not in stats:
+                stats[team.id] = {
+                    "name": team.name, "emoji": team.color_emoji,
+                    "GP": 0, "W": 0, "D": 0, "L": 0, "GF": 0, "GA": 0,
+                }
+            s = stats[team.id]
+            s["GP"] += 1
+            s["GF"] += gf
+            s["GA"] += ga
+            if gf > ga:
+                s["W"] += 1
+            elif gf == ga:
+                s["D"] += 1
+            else:
+                s["L"] += 1
+
+    for s in stats.values():
+        s["Pts"] = s["W"] * 3 + s["D"]
+
+    table = sorted(stats.values(), key=lambda x: (-x["Pts"], -(x["GF"] - x["GA"]), -x["GF"]))
+
+    date_str = game_day.scheduled_at.strftime("%d.%m.%Y")
+    lines = [f"🏆 <b>Таблица турнира</b> — {date_str}\n"]
+
+    if not table:
+        lines.append("Матчей ещё не сыграно.")
+    else:
+        lines.append("<code>№  Команда          И  В  Н  П  ГЗ ГП  О</code>")
+        lines.append("<code>" + "─" * 42 + "</code>")
+        for i, s in enumerate(table, 1):
+            name = (s["emoji"] + " " + s["name"])[:15].ljust(15)
+            row = (
+                f"{i:<3}{name}"
+                f"{s['GP']:<3}{s['W']:<3}{s['D']:<3}{s['L']:<3}"
+                f"{s['GF']:<3}{s['GA']:<3}{s['Pts']}"
+            )
+            lines.append(f"<code>{row}</code>")
+
+    # Последние результаты
+    all_finished = [m for m in matches]
+    if all_finished:
+        lines.append("\n<b>Последние результаты:</b>")
+        for m in all_finished[-5:]:
+            lines.append(
+                f"  {m.team_home.name} <b>{m.score_home}:{m.score_away}</b> {m.team_away.name}"
+            )
+
+    # Предстоящие матчи
+    upcoming_result = await session.execute(
+        select(Match)
+        .options(selectinload(Match.team_home), selectinload(Match.team_away))
+        .where(Match.game_day_id == game_day.id, Match.status == MatchStatus.SCHEDULED)
+    )
+    upcoming = upcoming_result.scalars().all()
+    if upcoming:
+        lines.append("\n<b>Предстоящие матчи:</b>")
+        for m in upcoming[:5]:
+            lines.append(f"  ⏳ {m.team_home.name} vs {m.team_away.name}")
+
+    await call.message.edit_text("\n".join(lines), reply_markup=main_menu_kb())
