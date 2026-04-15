@@ -7,9 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
-    Player, Payment
+    Player, Payment, Team, TeamPlayer, Match, Goal, Card,
 )
-from app.keyboards.game_day import game_day_action_kb, join_game_kb
+from app.keyboards.game_day import game_day_action_kb, join_game_kb, delete_confirm_kb
 
 router = Router()
 
@@ -217,3 +217,126 @@ async def toggle_payment(call: CallbackQuery, session: AsyncSession):
     await call.answer("✅ Статус оплаты обновлён")
     # Перезагрузить список
     await gd_payment(call, session)
+
+
+# ---------- Отменить игру ----------
+
+@router.callback_query(F.data.startswith("gd_cancel:"))
+async def gd_cancel_game(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        await call.message.edit_text("❌ Игровой день не найден.")
+        return
+
+    game_day.status = GameDayStatus.CANCELLED
+    await session.commit()
+
+    # Уведомить записавшихся
+    att_result = await session.execute(
+        select(Attendance).where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES,
+        )
+    )
+    attendances = att_result.scalars().all()
+
+    cancel_text = (
+        f"❌ <b>Игра отменена</b>\n\n"
+        f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"📍 {game_day.location}\n\n"
+        "Игра отменена организатором. Извини за неудобство!"
+    )
+
+    notified = 0
+    for att in attendances:
+        try:
+            await bot.send_message(att.player.telegram_id, cancel_text)
+            notified += 1
+        except Exception:
+            pass
+
+    await call.message.edit_text(
+        f"❌ <b>Игра отменена.</b>\n\nУведомление отправлено {notified} игрокам.",
+        reply_markup=game_day_action_kb(game_day_id)
+    )
+
+
+# ---------- Удалить игровой день (запрос подтверждения) ----------
+
+@router.callback_query(F.data.startswith("gd_delete:"))
+async def gd_delete_ask(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        await call.message.edit_text("❌ Игровой день не найден.")
+        return
+
+    await call.message.edit_text(
+        f"🗑 <b>Удалить игровой день?</b>\n\n"
+        f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"📍 {game_day.location}\n\n"
+        "⚠️ Это действие <b>нельзя отменить</b>. "
+        "Все матчи, команды, записи и оплаты будут удалены.",
+        reply_markup=delete_confirm_kb(game_day_id)
+    )
+
+
+# ---------- Удалить игровой день (исполнение) ----------
+
+@router.callback_query(F.data.startswith("gd_delete_ok:"))
+async def gd_delete_execute(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("🗑 Удаляю...", show_alert=False)
+
+    game_day_id = int(call.data.split(":")[1])
+
+    from sqlalchemy import delete as sql_delete
+
+    # Получить ID матчей этого игрового дня
+    matches_result = await session.execute(
+        select(Match.id).where(Match.game_day_id == game_day_id)
+    )
+    match_ids = [r[0] for r in matches_result.all()]
+
+    # Получить ID команд этого игрового дня
+    teams_result = await session.execute(
+        select(Team.id).where(Team.game_day_id == game_day_id)
+    )
+    team_ids = [r[0] for r in teams_result.all()]
+
+    # Каскадное удаление: Голы → Карточки → Матчи → TeamPlayers → Команды → Посещения → Оплаты → GameDay
+    if match_ids:
+        await session.execute(sql_delete(Goal).where(Goal.match_id.in_(match_ids)))
+        await session.execute(sql_delete(Card).where(Card.match_id.in_(match_ids)))
+        await session.execute(sql_delete(Match).where(Match.id.in_(match_ids)))
+
+    if team_ids:
+        await session.execute(sql_delete(TeamPlayer).where(TeamPlayer.team_id.in_(team_ids)))
+        await session.execute(sql_delete(Team).where(Team.id.in_(team_ids)))
+
+    await session.execute(sql_delete(Attendance).where(Attendance.game_day_id == game_day_id))
+    await session.execute(sql_delete(Payment).where(Payment.game_day_id == game_day_id))
+
+    game_day = await session.get(GameDay, game_day_id)
+    if game_day:
+        await session.delete(game_day)
+
+    await session.commit()
+
+    await call.message.edit_text(
+        "🗑 <b>Игровой день удалён.</b>\n\n"
+        "Все связанные данные (команды, матчи, записи, оплаты) удалены."
+    )
