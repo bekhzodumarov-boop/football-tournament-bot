@@ -1,11 +1,20 @@
 """
 Обработчики для судьи (referee).
 Доступ: игроки с is_referee=True ИЛИ администраторы.
+
+Новая логика создания матча:
+  1. Название Команды 1
+  2. Выбор игроков Команды 1 (мультивыбор из записавшихся)
+  3. Название Команды 2
+  4. Выбор игроков Команды 2 (из оставшихся)
+  5. Длительность матча
+
+При фиксации гола/ЖК/КК — показывать только игроков выбранной команды.
 """
 from datetime import datetime, timedelta
 
 from aiogram import Router, F, Bot
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
@@ -17,7 +26,7 @@ from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus,
     Attendance, AttendanceResponse,
-    Team, Match, MatchStatus,
+    Team, TeamPlayer, Match, MatchStatus,
     Goal, GoalType,
     Card, CardType,
     Player,
@@ -25,12 +34,13 @@ from app.database.models import (
 from app.keyboards.referee import (
     referee_gamedays_kb, referee_gd_kb, referee_match_kb,
     select_team_kb, select_player_kb, confirm_finish_kb,
+    team_players_select_kb,
 )
 from app.scheduler import scheduler
 
 router = Router()
 
-# match_id → {bot, chat_id, message_id, started_at, duration_min, home, away, score_home, score_away}
+# match_id → {bot, chat_id, message_id, started_at, duration_min, home, away, score_*}
 _active_timers: dict[int, dict] = {}
 
 
@@ -40,7 +50,9 @@ _active_timers: dict[int, dict] = {}
 
 class RefereeMatchFSM(StatesGroup):
     waiting_team1 = State()
+    waiting_team1_players = State()
     waiting_team2 = State()
+    waiting_team2_players = State()
     waiting_duration = State()
 
 
@@ -53,7 +65,6 @@ def _is_referee(user_id: int, player: Player | None) -> bool:
 
 
 async def _load_match(session: AsyncSession, match_id: int) -> Match | None:
-    """Загрузить матч со всеми связями (selectinload для async)."""
     result = await session.execute(
         select(Match)
         .options(
@@ -68,6 +79,7 @@ async def _load_match(session: AsyncSession, match_id: int) -> Match | None:
 
 
 async def _get_attendees(session: AsyncSession, game_day_id: int) -> list[Player]:
+    """Все игроки, записавшиеся на игровой день."""
     result = await session.execute(
         select(Player)
         .join(Attendance, Attendance.player_id == Player.id)
@@ -75,6 +87,17 @@ async def _get_attendees(session: AsyncSession, game_day_id: int) -> list[Player
             Attendance.game_day_id == game_day_id,
             Attendance.response == AttendanceResponse.YES,
         )
+        .order_by(Player.name)
+    )
+    return result.scalars().all()
+
+
+async def _get_team_players(session: AsyncSession, team_id: int) -> list[Player]:
+    """Игроки конкретной команды (из TeamPlayer)."""
+    result = await session.execute(
+        select(Player)
+        .join(TeamPlayer, TeamPlayer.player_id == Player.id)
+        .where(TeamPlayer.team_id == team_id)
         .order_by(Player.name)
     )
     return result.scalars().all()
@@ -95,11 +118,10 @@ def _timer_text(home: str, away: str, started_at: datetime, duration_min: int,
     total_sec = total.total_seconds()
 
     if remaining.total_seconds() <= 0:
-        bar = "█" * 20
         return (
             f"🔔 <b>ВРЕМЯ ВЫШЛО!</b>\n\n"
             f"⚽ <b>{home}  {score_home}:{score_away}  {away}</b>\n\n"
-            f"[{bar}] 100%\n\n"
+            f"[{'█' * 20}] 100%\n\n"
             "Зафиксируй финальный счёт!"
         )
 
@@ -109,7 +131,6 @@ def _timer_text(home: str, away: str, started_at: datetime, duration_min: int,
     el_sec = int(elapsed_sec % 60)
     pct = int(elapsed_sec / total_sec * 100)
     bar = _progress_bar(elapsed_sec, total_sec)
-
     return (
         f"⏱ <b>Таймер матча</b>\n\n"
         f"⚽ <b>{home}  {score_home}:{score_away}  {away}</b>\n\n"
@@ -133,22 +154,19 @@ def _match_panel_text(match: Match) -> str:
     else:
         timer_line = "⏱ Таймер не запущен"
 
-    goals_lines = []
-    for g in sorted(match.goals, key=lambda x: x.scored_at):
-        own = " (авт.)" if g.goal_type == GoalType.OWN_GOAL else ""
-        t = home if g.team_id == match.team_home_id else away
-        goals_lines.append(f"  🥅 {g.player.name}{own} [{t}]")
+    goals_lines = [
+        f"  🥅 {g.player.name}"
+        + (" (авт.)" if g.goal_type == GoalType.OWN_GOAL else "")
+        + f" [{home if g.team_id == match.team_home_id else away}]"
+        for g in sorted(match.goals, key=lambda x: x.scored_at)
+    ]
+    card_lines = [
+        f"  {'🟡' if c.card_type == CardType.YELLOW else '🔴'} {c.player.name}"
+        f" [{home if c.team_id == match.team_home_id else away}]"
+        for c in sorted(match.cards, key=lambda x: x.issued_at)
+    ]
 
-    card_lines = []
-    for c in sorted(match.cards, key=lambda x: x.issued_at):
-        emoji = "🟡" if c.card_type == CardType.YELLOW else "🔴"
-        t = home if c.team_id == match.team_home_id else away
-        card_lines.append(f"  {emoji} {c.player.name} [{t}]")
-
-    text = (
-        f"⚽ <b>{home}  {match.score_home} : {match.score_away}  {away}</b>\n"
-        f"{timer_line}\n"
-    )
+    text = f"⚽ <b>{home}  {match.score_home} : {match.score_away}  {away}</b>\n{timer_line}\n"
     if goals_lines:
         text += "\n<b>Голы:</b>\n" + "\n".join(goals_lines) + "\n"
     if card_lines:
@@ -157,32 +175,24 @@ def _match_panel_text(match: Match) -> str:
 
 
 # ─────────────────────────────────────────────
-#  Живой таймер — APScheduler job (каждые 10 сек)
+#  Живой таймер (каждые 10 сек)
 # ─────────────────────────────────────────────
 
 async def _update_timer_message(match_id: int):
     data = _active_timers.get(match_id)
     if not data:
         return
-
     remaining = timedelta(minutes=data["duration_min"]) - (datetime.now() - data["started_at"])
-
     text = _timer_text(
-        data["home"], data["away"],
-        data["started_at"], data["duration_min"],
+        data["home"], data["away"], data["started_at"], data["duration_min"],
         data.get("score_home", 0), data.get("score_away", 0),
     )
-
     try:
         await data["bot"].edit_message_text(
-            text,
-            chat_id=data["chat_id"],
-            message_id=data["message_id"],
-            parse_mode="HTML",
+            text, chat_id=data["chat_id"], message_id=data["message_id"], parse_mode="HTML"
         )
     except Exception:
         pass
-
     if remaining.total_seconds() <= 0:
         try:
             scheduler.remove_job(f"timer_tick_{match_id}")
@@ -223,7 +233,7 @@ async def cmd_referee(message: Message, session: AsyncSession,
 
 
 # ─────────────────────────────────────────────
-#  Выбор игрового дня → список матчей
+#  Выбор игрового дня
 # ─────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("ref_gd:"))
@@ -250,14 +260,13 @@ async def ref_select_gameday(call: CallbackQuery, session: AsyncSession,
 
     await call.message.edit_text(
         f"🦺 <b>Игровой день {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}</b>\n"
-        f"📍 {game_day.location}\n\n"
-        "Выбери матч или создай новый:",
+        f"📍 {game_day.location}\n\nВыбери матч или создай новый:",
         reply_markup=referee_gd_kb(game_day_id, matches)
     )
 
 
 # ─────────────────────────────────────────────
-#  Создание нового матча (FSM)
+#  Создание матча — шаг 1: название Команды 1
 # ─────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("ref_new_match:"))
@@ -269,25 +278,133 @@ async def ref_new_match_start(call: CallbackQuery, state: FSMContext,
     await call.answer()
 
     game_day_id = int(call.data.split(":")[1])
-    await state.update_data(game_day_id=game_day_id)
+    await state.update_data(game_day_id=game_day_id, team1_player_ids=[], team2_player_ids=[])
     await state.set_state(RefereeMatchFSM.waiting_team1)
     await call.message.edit_text(
-        "➕ <b>Новый матч</b>\n\n"
+        "➕ <b>Новый матч</b>\n\nШаг 1 из 5\n\n"
         "Введи название <b>Команды 1</b>:\n"
-        "<i>Например: Красные, Команда А, и т.д.</i>"
+        "<i>Например: Красные, Команда А…</i>"
     )
 
 
 @router.message(RefereeMatchFSM.waiting_team1)
-async def ref_team1(message: Message, state: FSMContext):
+async def ref_team1(message: Message, state: FSMContext, session: AsyncSession):
     name = message.text.strip() if message.text else ""
     if not name:
         await message.answer("❌ Название не может быть пустым.")
         return
-    await state.update_data(team1_name=name)
-    await state.set_state(RefereeMatchFSM.waiting_team2)
-    await message.answer(f"✅ Команда 1: <b>{name}</b>\n\nВведи название <b>Команды 2</b>:")
 
+    await state.update_data(team1_name=name, selected_player_ids=[])
+
+    # Загрузить всех записавшихся и сохранить в FSM
+    data = await state.get_data()
+    attendees = await _get_attendees(session, data["game_day_id"])
+    available = [{"id": p.id, "name": p.name} for p in attendees]
+    await state.update_data(available_players=available)
+    await state.set_state(RefereeMatchFSM.waiting_team1_players)
+
+    await message.answer(
+        f"✅ Команда 1: <b>{name}</b>\n\n"
+        f"Шаг 2 из 5\n\n"
+        f"👥 Выбери игроков <b>{name}</b> из записавшихся на игру:\n"
+        f"<i>Нажимай на имена, потом «Готово»</i>",
+        reply_markup=team_players_select_kb(available, [], name)
+    )
+
+
+# ─────────────────────────────────────────────
+#  Создание матча — выбор игроков (общий для обеих команд)
+# ─────────────────────────────────────────────
+
+@router.callback_query(
+    F.data.startswith("ref_toggle_player:"),
+    StateFilter(RefereeMatchFSM.waiting_team1_players, RefereeMatchFSM.waiting_team2_players)
+)
+async def ref_toggle_player(call: CallbackQuery, state: FSMContext,
+                            player: Player | None):
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    toggled_id = int(call.data.split(":")[1])
+    data = await state.get_data()
+    selected: list[int] = list(data.get("selected_player_ids", []))
+    available: list[dict] = data.get("available_players", [])
+
+    # Toggle
+    if toggled_id in selected:
+        selected.remove(toggled_id)
+    else:
+        selected.append(toggled_id)
+
+    await state.update_data(selected_player_ids=selected)
+
+    # Определить название текущей команды для кнопки «Готово»
+    current_state = await state.get_state()
+    if current_state == RefereeMatchFSM.waiting_team1_players.state:
+        team_name = data.get("team1_name", "Команда 1")
+    else:
+        team_name = data.get("team2_name", "Команда 2")
+
+    await call.message.edit_reply_markup(
+        reply_markup=team_players_select_kb(available, selected, team_name)
+    )
+    await call.answer()
+
+
+@router.callback_query(
+    F.data == "ref_team_players_done",
+    StateFilter(RefereeMatchFSM.waiting_team1_players, RefereeMatchFSM.waiting_team2_players)
+)
+async def ref_team_players_done(call: CallbackQuery, state: FSMContext,
+                                player: Player | None):
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    data = await state.get_data()
+    selected: list[int] = data.get("selected_player_ids", [])
+    if not selected:
+        await call.answer("⚠️ Выбери хотя бы одного игрока", show_alert=True)
+        return
+
+    current_state = await state.get_state()
+
+    if current_state == RefereeMatchFSM.waiting_team1_players.state:
+        # Сохранить игроков Команды 1, подготовить выбор Команды 2
+        await state.update_data(team1_player_ids=selected, selected_player_ids=[])
+
+        # Доступные для Команды 2 — все, кроме уже выбранных в Команду 1
+        all_available: list[dict] = data.get("available_players", [])
+        remaining = [p for p in all_available if p["id"] not in selected]
+        await state.update_data(available_players=remaining)
+        await state.set_state(RefereeMatchFSM.waiting_team2)
+
+        team1_name = data.get("team1_name", "Команда 1")
+        await call.message.edit_text(
+            f"✅ <b>{team1_name}</b>: {len(selected)} игроков выбрано\n\n"
+            f"Шаг 3 из 5\n\n"
+            "Введи название <b>Команды 2</b>:"
+        )
+
+    else:
+        # Сохранить игроков Команды 2, перейти к вводу длительности
+        await state.update_data(team2_player_ids=selected, selected_player_ids=[])
+        await state.set_state(RefereeMatchFSM.waiting_duration)
+
+        team2_name = data.get("team2_name", "Команда 2")
+        await call.message.edit_text(
+            f"✅ <b>{team2_name}</b>: {len(selected)} игроков выбрано\n\n"
+            f"Шаг 5 из 5\n\n"
+            "Длительность матча (в минутах)?\n"
+            "<i>Введи число, например: 6</i>"
+        )
+
+
+# ─────────────────────────────────────────────
+#  Создание матча — шаг 3: название Команды 2
+# ─────────────────────────────────────────────
 
 @router.message(RefereeMatchFSM.waiting_team2)
 async def ref_team2(message: Message, state: FSMContext):
@@ -295,14 +412,24 @@ async def ref_team2(message: Message, state: FSMContext):
     if not name:
         await message.answer("❌ Название не может быть пустым.")
         return
-    await state.update_data(team2_name=name)
-    await state.set_state(RefereeMatchFSM.waiting_duration)
+
+    await state.update_data(team2_name=name, selected_player_ids=[])
+    data = await state.get_data()
+    available: list[dict] = data.get("available_players", [])
+    await state.set_state(RefereeMatchFSM.waiting_team2_players)
+
     await message.answer(
         f"✅ Команда 2: <b>{name}</b>\n\n"
-        "Длительность матча (в минутах)?\n"
-        "<i>Введи число, например: 20</i>"
+        f"Шаг 4 из 5\n\n"
+        f"👥 Выбери игроков <b>{name}</b>:\n"
+        f"<i>Нажимай на имена, потом «Готово»</i>",
+        reply_markup=team_players_select_kb(available, [], name)
     )
 
+
+# ─────────────────────────────────────────────
+#  Создание матча — шаг 5: длительность → создание
+# ─────────────────────────────────────────────
 
 @router.message(RefereeMatchFSM.waiting_duration)
 async def ref_duration(message: Message, state: FSMContext, session: AsyncSession):
@@ -317,13 +444,27 @@ async def ref_duration(message: Message, state: FSMContext, session: AsyncSessio
     data = await state.get_data()
     await state.clear()
 
-    team1 = Team(game_day_id=data["game_day_id"], name=data["team1_name"], color_emoji="🔴")
-    team2 = Team(game_day_id=data["game_day_id"], name=data["team2_name"], color_emoji="🔵")
+    game_day_id = data["game_day_id"]
+    team1_name = data["team1_name"]
+    team2_name = data["team2_name"]
+    team1_player_ids: list[int] = data.get("team1_player_ids", [])
+    team2_player_ids: list[int] = data.get("team2_player_ids", [])
+
+    # Создать команды
+    team1 = Team(game_day_id=game_day_id, name=team1_name, color_emoji="🔴")
+    team2 = Team(game_day_id=game_day_id, name=team2_name, color_emoji="🔵")
     session.add_all([team1, team2])
     await session.flush()
 
+    # Привязать игроков к командам
+    for pid in team1_player_ids:
+        session.add(TeamPlayer(team_id=team1.id, player_id=pid))
+    for pid in team2_player_ids:
+        session.add(TeamPlayer(team_id=team2.id, player_id=pid))
+
+    # Создать матч
     match = Match(
-        game_day_id=data["game_day_id"],
+        game_day_id=game_day_id,
         team_home_id=team1.id,
         team_away_id=team2.id,
         match_format="time",
@@ -332,12 +473,12 @@ async def ref_duration(message: Message, state: FSMContext, session: AsyncSessio
     )
     session.add(match)
     await session.commit()
-
     match = await _load_match(session, match.id)
 
     await message.answer(
         f"✅ <b>Матч создан!</b>\n\n"
-        f"⚽ {data['team1_name']} vs {data['team2_name']}\n"
+        f"🔴 {team1_name} ({len(team1_player_ids)} чел.) vs "
+        f"🔵 {team2_name} ({len(team2_player_ids)} чел.)\n"
         f"⏱ Длительность: {duration} мин.\n\n"
         "Используй кнопки для управления матчем:",
         reply_markup=referee_match_kb(match.id, is_started=False, is_finished=False)
@@ -398,7 +539,6 @@ async def ref_start_timer(call: CallbackQuery, session: AsyncSession,
     away = match.team_away.name
     duration_min = match.duration_min
 
-    # Отдельное сообщение-таймер
     timer_msg = await call.message.answer(
         _timer_text(home, away, now, duration_min, match.score_home, match.score_away)
     )
@@ -415,7 +555,6 @@ async def ref_start_timer(call: CallbackQuery, session: AsyncSession,
         "score_away": match.score_away,
     }
 
-    # Обновление каждые 10 секунд
     scheduler.add_job(
         _update_timer_message,
         trigger="interval",
@@ -426,7 +565,6 @@ async def ref_start_timer(call: CallbackQuery, session: AsyncSession,
         max_instances=1,
     )
 
-    # Обновить панель управления
     await call.message.edit_text(
         _match_panel_text(match),
         reply_markup=referee_match_kb(match_id, is_started=True, is_finished=False)
@@ -434,7 +572,7 @@ async def ref_start_timer(call: CallbackQuery, session: AsyncSession,
 
 
 # ─────────────────────────────────────────────
-#  ГОЛ
+#  ГОЛ — шаг 1: выбор команды
 # ─────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("ref_goal:"))
@@ -460,6 +598,10 @@ async def ref_goal_select_team(call: CallbackQuery, session: AsyncSession,
     )
 
 
+# ─────────────────────────────────────────────
+#  ГОЛ — шаг 2: выбор игрока из состава команды
+# ─────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("ref_goal_team:"))
 async def ref_goal_select_player(call: CallbackQuery, session: AsyncSession,
                                   player: Player | None):
@@ -470,20 +612,29 @@ async def ref_goal_select_player(call: CallbackQuery, session: AsyncSession,
 
     _, match_id_str, team_id_str = call.data.split(":")
     match_id = int(match_id_str)
+    team_id = int(team_id_str)
+
     match = await _load_match(session, match_id)
     if not match:
         return
 
-    players = await _get_attendees(session, match.game_day_id)
+    team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
+
+    # Игроки конкретной команды
+    players = await _get_team_players(session, team_id)
     if not players:
-        await call.answer("❌ Нет записавшихся игроков", show_alert=True)
-        return
+        # Fallback: если состав не задан — показать всех записавшихся
+        players = await _get_attendees(session, match.game_day_id)
 
     await call.message.edit_text(
-        "🥅 <b>Гол</b>\n\nКто забил?",
-        reply_markup=select_player_kb(match_id, "ref_goal_player", int(team_id_str), players)
+        f"🥅 <b>Гол — {team_name}</b>\n\nКто забил?",
+        reply_markup=select_player_kb(match_id, "ref_goal_player", team_id, players)
     )
 
+
+# ─────────────────────────────────────────────
+#  ГОЛ — шаг 3: записать
+# ─────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("ref_goal_player:"))
 async def ref_goal_record(call: CallbackQuery, session: AsyncSession,
@@ -505,7 +656,6 @@ async def ref_goal_record(call: CallbackQuery, session: AsyncSession,
         match_id=match_id, player_id=scorer_id, team_id=team_id,
         goal_type=GoalType.GOAL, scored_at=datetime.now(),
     ))
-
     if team_id == match.team_home_id:
         match.score_home += 1
     else:
@@ -514,7 +664,6 @@ async def ref_goal_record(call: CallbackQuery, session: AsyncSession,
     await session.commit()
     match = await _load_match(session, match_id)
 
-    # Синхронизировать счёт с таймером
     if match_id in _active_timers:
         _active_timers[match_id]["score_home"] = match.score_home
         _active_timers[match_id]["score_away"] = match.score_away
@@ -548,7 +697,7 @@ async def ref_yellow_select_team(call: CallbackQuery, session: AsyncSession,
         return
 
     await call.message.edit_text(
-        "🟡 <b>Жёлтая карточка</b>\n\nИз какой команды игрок?",
+        "🟡 <b>Жёлтая карточка</b>\n\nИз какой команды?",
         reply_markup=select_team_kb(
             match_id, "ref_yellow_team",
             match.team_home_id, match.team_home.name,
@@ -566,15 +715,19 @@ async def ref_yellow_select_player(call: CallbackQuery, session: AsyncSession,
     await call.answer()
 
     _, match_id_str, team_id_str = call.data.split(":")
-    match_id = int(match_id_str)
+    match_id, team_id = int(match_id_str), int(team_id_str)
     match = await _load_match(session, match_id)
     if not match:
         return
 
-    players = await _get_attendees(session, match.game_day_id)
+    team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
+    players = await _get_team_players(session, team_id)
+    if not players:
+        players = await _get_attendees(session, match.game_day_id)
+
     await call.message.edit_text(
-        "🟡 <b>Жёлтая карточка</b>\n\nКому?",
-        reply_markup=select_player_kb(match_id, "ref_yellow_player", int(team_id_str), players)
+        f"🟡 <b>Жёлтая карточка — {team_name}</b>\n\nКому?",
+        reply_markup=select_player_kb(match_id, "ref_yellow_player", team_id, players)
     )
 
 
@@ -629,7 +782,7 @@ async def ref_red_select_team(call: CallbackQuery, session: AsyncSession,
         return
 
     await call.message.edit_text(
-        "🔴 <b>Красная карточка</b>\n\nИз какой команды игрок?",
+        "🔴 <b>Красная карточка</b>\n\nИз какой команды?",
         reply_markup=select_team_kb(
             match_id, "ref_red_team",
             match.team_home_id, match.team_home.name,
@@ -647,15 +800,19 @@ async def ref_red_select_player(call: CallbackQuery, session: AsyncSession,
     await call.answer()
 
     _, match_id_str, team_id_str = call.data.split(":")
-    match_id = int(match_id_str)
+    match_id, team_id = int(match_id_str), int(team_id_str)
     match = await _load_match(session, match_id)
     if not match:
         return
 
-    players = await _get_attendees(session, match.game_day_id)
+    team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
+    players = await _get_team_players(session, team_id)
+    if not players:
+        players = await _get_attendees(session, match.game_day_id)
+
     await call.message.edit_text(
-        "🔴 <b>Красная карточка</b>\n\nКому?",
-        reply_markup=select_player_kb(match_id, "ref_red_player", int(team_id_str), players)
+        f"🔴 <b>Красная карточка — {team_name}</b>\n\nКому?",
+        reply_markup=select_player_kb(match_id, "ref_red_player", team_id, players)
     )
 
 
@@ -735,7 +892,6 @@ async def ref_finish_match(call: CallbackQuery, session: AsyncSession,
     await session.commit()
     match = await _load_match(session, match_id)
 
-    # Остановить таймер
     try:
         scheduler.remove_job(f"timer_tick_{match_id}")
     except Exception:

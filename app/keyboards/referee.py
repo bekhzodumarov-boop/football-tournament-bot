@@ -96,3 +96,31 @@ def confirm_finish_kb(match_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"ref_match:{match_id}"),
     )
     return builder.as_markup()
+
+
+def team_players_select_kb(
+    players: list[dict],   # [{"id": int, "name": str}, ...]
+    selected_ids: list[int],
+    team_name: str,
+) -> InlineKeyboardMarkup:
+    """Мультивыбор игроков для команды во время создания матча."""
+    builder = InlineKeyboardBuilder()
+    for p in players:
+        tick = "✅" if p["id"] in selected_ids else "◻️"
+        builder.button(
+            text=f"{tick} {p['name']}",
+            callback_data=f"ref_toggle_player:{p['id']}",
+        )
+    builder.adjust(2)
+    count = len(selected_ids)
+    if count > 0:
+        builder.row(InlineKeyboardButton(
+            text=f"✅ Готово — {count} чел. в «{team_name}»",
+            callback_data="ref_team_players_done",
+        ))
+    else:
+        builder.row(InlineKeyboardButton(
+            text="⚠️ Выбери хотя бы одного игрока",
+            callback_data="noop",
+        ))
+    return builder.as_markup()
