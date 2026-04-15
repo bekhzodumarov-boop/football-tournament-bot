@@ -340,3 +340,179 @@ async def gd_delete_execute(call: CallbackQuery, session: AsyncSession):
         "🗑 <b>Игровой день удалён.</b>\n\n"
         "Все связанные данные (команды, матчи, записи, оплаты) удалены."
     )
+
+
+# ══════════════════════════════════════════════════════
+#  УПРАВЛЕНИЕ ИГРОКАМИ — назначение судей, статусы
+# ══════════════════════════════════════════════════════
+
+def _players_list_kb(players: list[Player]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for p in players:
+        ref_mark = " 🦺" if p.is_referee else ""
+        builder.row(InlineKeyboardButton(
+            text=f"{p.name}{ref_mark}",
+            callback_data=f"adm_player:{p.id}"
+        ))
+    builder.row(InlineKeyboardButton(text="🔙 Меню", callback_data="admin_back"))
+    return builder.as_markup()
+
+
+def _player_card_kb(player: Player) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if player.is_referee:
+        builder.row(InlineKeyboardButton(
+            text="❌ Снять роль судьи",
+            callback_data=f"adm_toggle_ref:{player.id}"
+        ))
+    else:
+        builder.row(InlineKeyboardButton(
+            text="🦺 Назначить судьёй",
+            callback_data=f"adm_toggle_ref:{player.id}"
+        ))
+    builder.row(
+        InlineKeyboardButton(text="🚫 Заблокировать" if player.status.value == "active" else "✅ Разблокировать",
+                             callback_data=f"adm_toggle_ban:{player.id}"),
+    )
+    builder.row(InlineKeyboardButton(text="🔙 К списку", callback_data="admin_players"))
+    return builder.as_markup()
+
+
+@router.callback_query(F.data == "admin_players")
+async def adm_players_list(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    result = await session.execute(select(Player).order_by(Player.name))
+    players = result.scalars().all()
+
+    if not players:
+        await call.message.edit_text("👥 Игроков пока нет.")
+        return
+
+    referees = [p for p in players if p.is_referee]
+    ref_names = ", ".join(p.name for p in referees) if referees else "нет"
+
+    await call.message.edit_text(
+        f"👥 <b>Игроки</b> ({len(players)} чел.)\n\n"
+        f"🦺 Судьи: <b>{ref_names}</b>\n\n"
+        "Нажми на игрока чтобы изменить роль:",
+        reply_markup=_players_list_kb(players)
+    )
+
+
+@router.callback_query(F.data.startswith("adm_player:"))
+async def adm_player_card(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    player_id = int(call.data.split(":")[1])
+    player = await session.get(Player, player_id)
+    if not player:
+        await call.message.edit_text("❌ Игрок не найден.")
+        return
+
+    from app.database.models import POSITION_LABELS
+    pos = POSITION_LABELS.get(player.position, player.position)
+    role = "🦺 Судья" if player.is_referee else "⚽ Игрок"
+    status = "✅ Активен" if player.status.value == "active" else "🚫 Заблокирован"
+
+    await call.message.edit_text(
+        f"👤 <b>{player.name}</b>\n\n"
+        f"Позиция: {pos}\n"
+        f"Роль: {role}\n"
+        f"Статус: {status}\n"
+        f"⭐ Рейтинг: {player.rating:.1f}\n"
+        f"⚽ Игр: {player.games_played}\n"
+        f"💰 Баланс: {player.balance} сум.",
+        reply_markup=_player_card_kb(player)
+    )
+
+
+@router.callback_query(F.data.startswith("adm_toggle_ref:"))
+async def adm_toggle_referee(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    player_id = int(call.data.split(":")[1])
+    player = await session.get(Player, player_id)
+    if not player:
+        await call.answer("❌ Игрок не найден", show_alert=True)
+        return
+
+    player.is_referee = not player.is_referee
+    await session.commit()
+
+    action = "назначен судьёй 🦺" if player.is_referee else "снят с роли судьи"
+    await call.answer(f"{player.name} {action}", show_alert=True)
+
+    # Уведомить самого игрока
+    try:
+        if player.is_referee:
+            await bot.send_message(
+                player.telegram_id,
+                "🦺 <b>Тебе назначена роль судьи!</b>\n\n"
+                "Теперь ты можешь использовать команду /referee "
+                "для управления матчами."
+            )
+        else:
+            await bot.send_message(
+                player.telegram_id,
+                "ℹ️ Роль судьи снята с твоего аккаунта."
+            )
+    except Exception:
+        pass
+
+    # Обновить карточку
+    await adm_player_card(call, session)
+
+
+@router.callback_query(F.data.startswith("adm_toggle_ban:"))
+async def adm_toggle_ban(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    from app.database.models import PlayerStatus
+    player_id = int(call.data.split(":")[1])
+    player = await session.get(Player, player_id)
+    if not player:
+        await call.answer("❌ Игрок не найден", show_alert=True)
+        return
+
+    if player.status == PlayerStatus.ACTIVE:
+        player.status = PlayerStatus.BANNED
+        action = "заблокирован 🚫"
+        msg = "🚫 Твой аккаунт заблокирован. Обратись к организатору."
+    else:
+        player.status = PlayerStatus.ACTIVE
+        action = "разблокирован ✅"
+        msg = "✅ Твой аккаунт разблокирован. Добро пожаловать обратно!"
+
+    await session.commit()
+    await call.answer(f"{player.name} {action}", show_alert=True)
+
+    try:
+        await bot.send_message(player.telegram_id, msg)
+    except Exception:
+        pass
+
+    await adm_player_card(call, session)
+
+
+@router.callback_query(F.data == "admin_back")
+async def adm_back_to_menu(call: CallbackQuery):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+    from app.keyboards.main_menu import admin_menu_kb
+    await call.message.edit_text(
+        "🔧 <b>Панель администратора</b>\n\nВыбери действие:",
+        reply_markup=admin_menu_kb()
+    )
