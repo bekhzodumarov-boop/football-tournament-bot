@@ -59,6 +59,10 @@ class GoalType(str, PyEnum):
     GOAL = "goal"
     OWN_GOAL = "own_goal"
 
+class CardType(str, PyEnum):
+    YELLOW = "yellow"
+    RED = "red"
+
 
 # ---------- Models ----------
 
@@ -77,6 +81,7 @@ class Player(Base):
     balance: Mapped[int] = mapped_column(Integer, default=0)      # в рублях
     games_played: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[PlayerStatus] = mapped_column(Enum(PlayerStatus), default=PlayerStatus.ACTIVE)
+    is_referee: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     # Relationships
@@ -188,6 +193,7 @@ class Match(Base):
     team_home: Mapped["Team"] = relationship(foreign_keys=[team_home_id])
     team_away: Mapped["Team"] = relationship(foreign_keys=[team_away_id])
     goals: Mapped[list["Goal"]] = relationship(back_populates="match")
+    cards: Mapped[list["Card"]] = relationship(back_populates="match")
 
 
 class Goal(Base):
@@ -245,3 +251,18 @@ class RatingVote(Base):
     round: Mapped["RatingRound"] = relationship(back_populates="votes")
     voter: Mapped["Player"] = relationship(foreign_keys=[voter_id])
     nominee: Mapped["Player"] = relationship(foreign_keys=[nominee_id])
+
+
+class Card(Base):
+    __tablename__ = "cards"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    card_type: Mapped[CardType] = mapped_column(Enum(CardType))
+    issued_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    match: Mapped["Match"] = relationship(back_populates="cards")
+    player: Mapped["Player"] = relationship()
+    team: Mapped["Team"] = relationship()

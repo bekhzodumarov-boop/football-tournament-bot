@@ -73,7 +73,7 @@ async def show_next_game(event, session: AsyncSession, player: Player | None):
         f"📍 {game_day.location}\n"
         f"👥 Мест: <b>{registered}/{game_day.player_limit}</b> "
         + (f"(свободно: {spots_left})" if spots_left > 0 else "(<b>мест нет</b>)")
-        + f"\n💰 Взнос: {game_day.cost_per_player} руб."
+        + f"\n💰 Взнос: {game_day.cost_per_player} сум."
         + player_status
     )
 
@@ -99,7 +99,7 @@ async def join_game(call: CallbackQuery, session: AsyncSession, player: Player |
     # Проверить долг
     if player.balance < 0 and settings.DEBUG is False:
         await call.message.answer(
-            f"⚠️ У тебя долг {abs(player.balance)} руб.\n"
+            f"⚠️ У тебя долг {abs(player.balance)} сум.\n"
             "Сначала погаси долг — свяжись с организатором."
         )
         return
@@ -236,7 +236,7 @@ async def create_gd_limit(message: Message, state: FSMContext):
     await state.update_data(player_limit=limit)
     await message.answer(
         f"✅ Лимит: <b>{limit} игроков</b>\n\n"
-        "Взнос с игрока (в рублях)? Введи 0 если бесплатно:"
+        "Взнос с игрока (в сумах)? Введи 0 если бесплатно:"
     )
     await state.set_state(CreateGameDayFSM.waiting_cost)
 
@@ -273,7 +273,7 @@ async def create_gd_cost(message: Message, state: FSMContext, session: AsyncSess
         f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
         f"📍 {game_day.location}\n"
         f"👥 Лимит: {game_day.player_limit} игроков\n"
-        f"💰 Взнос: {game_day.cost_per_player} руб.\n"
+        f"💰 Взнос: {game_day.cost_per_player} сум.\n"
         f"🔒 Запись закрывается: {deadline.strftime('%d.%m %H:%M')}\n\n"
         "Теперь разошли анонс игрокам:",
         reply_markup=game_day_action_kb(game_day.id)

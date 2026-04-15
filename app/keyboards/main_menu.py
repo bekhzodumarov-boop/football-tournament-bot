@@ -12,7 +12,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="👥 Игроки", callback_data="players_list"),
     )
     builder.row(
-        InlineKeyboardButton(text="💰 Мой баланс", callback_data="my_balance"),
+        InlineKeyboardButton(text="📋 Результаты игр", callback_data="match_results"),
         InlineKeyboardButton(text="ℹ️ Мой профиль", callback_data="my_profile"),
     )
     return builder.as_markup()

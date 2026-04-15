@@ -97,6 +97,73 @@ async def cb_my_profile(call: CallbackQuery, player: Player | None):
     await call.message.edit_text(text, reply_markup=main_menu_kb())
 
 
+@router.callback_query(lambda c: c.data == "players_list")
+async def cb_players_list(call: CallbackQuery, session: AsyncSession):
+    await call.answer()
+    from sqlalchemy import select
+    from app.database.models import PlayerStatus, POSITION_LABELS
+
+    result = await session.execute(
+        select(Player)
+        .where(Player.status == PlayerStatus.ACTIVE)
+        .order_by(Player.rating.desc())
+    )
+    players = result.scalars().all()
+
+    if not players:
+        await call.message.edit_text("👥 Игроков пока нет.", reply_markup=main_menu_kb())
+        return
+
+    lines = ["👥 <b>Все игроки</b>\n"]
+    for i, p in enumerate(players, 1):
+        pos = POSITION_LABELS.get(p.position, p.position)
+        provisional = " <i>(пров.)</i>" if p.rating_provisional else ""
+        lines.append(f"{i}. <b>{p.name}</b> — {pos}, ⭐{p.rating:.1f}{provisional}")
+
+    await call.message.edit_text("\n".join(lines), reply_markup=main_menu_kb())
+
+
+@router.callback_query(lambda c: c.data == "match_results")
+async def cb_match_results(call: CallbackQuery, session: AsyncSession):
+    await call.answer()
+    from sqlalchemy import select
+    from app.database.models import Match, MatchStatus, Goal, Card, CardType, GoalType
+
+    result = await session.execute(
+        select(Match)
+        .where(Match.status == MatchStatus.FINISHED)
+        .order_by(Match.finished_at.desc())
+        .limit(10)
+    )
+    matches = result.scalars().all()
+
+    if not matches:
+        await call.message.edit_text("📋 Сыгранных матчей пока нет.", reply_markup=main_menu_kb())
+        return
+
+    lines = ["📋 <b>Результаты игр</b>\n"]
+    for match in matches:
+        home = match.team_home.name
+        away = match.team_away.name
+        date = match.finished_at.strftime("%d.%m") if match.finished_at else "—"
+        lines.append(f"\n⚽ <b>{home} {match.score_home}:{match.score_away} {away}</b> ({date})")
+
+        # Голы
+        for goal in match.goals:
+            marker = "🥅" if goal.goal_type == GoalType.OWN_GOAL else "⚽"
+            team_name = match.team_home.name if goal.team_id == match.team_home_id else match.team_away.name
+            own = " (авт.)" if goal.goal_type == GoalType.OWN_GOAL else ""
+            lines.append(f"  {marker} {goal.player.name}{own} [{team_name}]")
+
+        # Карточки
+        for card in match.cards:
+            emoji = "🟡" if card.card_type == CardType.YELLOW else "🔴"
+            team_name = match.team_home.name if card.team_id == match.team_home_id else match.team_away.name
+            lines.append(f"  {emoji} {card.player.name} [{team_name}]")
+
+    await call.message.edit_text("\n".join(lines), reply_markup=main_menu_kb())
+
+
 @router.callback_query(lambda c: c.data == "my_stats")
 async def cb_my_stats(call: CallbackQuery, player: Player | None, session: AsyncSession):
     await call.answer()

@@ -92,7 +92,7 @@ async def gd_announce(call: CallbackQuery, session: AsyncSession, bot: Bot):
         f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
         f"📍 {game_day.location}\n"
         f"👥 Мест: {game_day.player_limit}\n"
-        f"💰 Взнос: {game_day.cost_per_player} руб.\n\n"
+        f"💰 Взнос: {game_day.cost_per_player} сум.\n\n"
         "Успей записаться! 👇"
     )
 

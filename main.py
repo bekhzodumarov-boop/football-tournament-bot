@@ -10,6 +10,7 @@ from app.config import settings
 from app.database.engine import create_db_and_tables
 from app.handlers import register_all_handlers
 from app.middlewares.auth import AuthMiddleware
+from app.scheduler import scheduler
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -48,6 +49,10 @@ async def main():
     await create_db_and_tables()
     logger.info("Database ready")
 
+    # Запустить планировщик (таймеры матчей)
+    scheduler.start()
+    logger.info("Scheduler started")
+
     # Уведомить Админа о запуске
     for admin_id in settings.ADMIN_IDS:
         try:
@@ -60,6 +65,7 @@ async def main():
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        scheduler.shutdown(wait=False)
         await bot.session.close()
         logger.info("Bot stopped")
 
