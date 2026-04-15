@@ -69,7 +69,7 @@ class Player(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     name: Mapped[str] = mapped_column(String(100))
-    position: Mapped[Position] = mapped_column(Enum(Position))
+    position: Mapped[Position] = mapped_column(Enum(Position), name="player_position")
     self_rating: Mapped[int] = mapped_column(Integer, default=5)  # самооценка 1-10
     rating: Mapped[float] = mapped_column(Float, default=5.0)     # итоговый рейтинг
     rating_provisional: Mapped[bool] = mapped_column(Boolean, default=True)
