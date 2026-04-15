@@ -82,6 +82,7 @@ class Player(Base):
     games_played: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[PlayerStatus] = mapped_column(Enum(PlayerStatus), default=PlayerStatus.ACTIVE)
     is_referee: Mapped[bool] = mapped_column(Boolean, default=False)
+    photo_file_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     # Relationships
@@ -186,6 +187,7 @@ class Match(Base):
     score_away: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[MatchStatus] = mapped_column(Enum(MatchStatus), default=MatchStatus.SCHEDULED)
     match_format: Mapped[MatchFormat] = mapped_column(Enum(MatchFormat), default=MatchFormat.TIME)
+    duration_min: Mapped[int] = mapped_column(Integer, default=20)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 

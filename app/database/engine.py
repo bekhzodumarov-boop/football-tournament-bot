@@ -49,18 +49,33 @@ async def _run_migrations(conn):
     is_sqlite = db_url.startswith("sqlite")
 
     if is_sqlite:
-        # SQLite не поддерживает IF NOT EXISTS в ALTER TABLE
-        # Проверяем через PRAGMA
+        # SQLite не поддерживает IF NOT EXISTS в ALTER TABLE — проверяем через PRAGMA
         result = await conn.execute(text("PRAGMA table_info(players)"))
         columns = [row[1] for row in result.fetchall()]
         if "is_referee" not in columns:
             await conn.execute(text(
                 "ALTER TABLE players ADD COLUMN is_referee BOOLEAN NOT NULL DEFAULT 0"
             ))
+        if "photo_file_id" not in columns:
+            await conn.execute(text(
+                "ALTER TABLE players ADD COLUMN photo_file_id VARCHAR(200)"
+            ))
+        result2 = await conn.execute(text("PRAGMA table_info(matches)"))
+        match_cols = [row[1] for row in result2.fetchall()]
+        if "duration_min" not in match_cols:
+            await conn.execute(text(
+                "ALTER TABLE matches ADD COLUMN duration_min INTEGER NOT NULL DEFAULT 20"
+            ))
     else:
         # PostgreSQL поддерживает IF NOT EXISTS
         await conn.execute(text(
             "ALTER TABLE players ADD COLUMN IF NOT EXISTS is_referee BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_file_id VARCHAR(200)"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE matches ADD COLUMN IF NOT EXISTS duration_min INTEGER NOT NULL DEFAULT 20"
         ))
 
 

@@ -127,10 +127,17 @@ async def cb_players_list(call: CallbackQuery, session: AsyncSession):
 async def cb_match_results(call: CallbackQuery, session: AsyncSession):
     await call.answer()
     from sqlalchemy import select
-    from app.database.models import Match, MatchStatus, Goal, Card, CardType, GoalType
+    from sqlalchemy.orm import selectinload
+    from app.database.models import Match, MatchStatus, Team, Goal, Card, CardType, GoalType, Player as P
 
     result = await session.execute(
         select(Match)
+        .options(
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+            selectinload(Match.cards).selectinload(Card.player),
+        )
         .where(Match.status == MatchStatus.FINISHED)
         .order_by(Match.finished_at.desc())
         .limit(10)
@@ -148,18 +155,15 @@ async def cb_match_results(call: CallbackQuery, session: AsyncSession):
         date = match.finished_at.strftime("%d.%m") if match.finished_at else "—"
         lines.append(f"\n⚽ <b>{home} {match.score_home}:{match.score_away} {away}</b> ({date})")
 
-        # Голы
-        for goal in match.goals:
-            marker = "🥅" if goal.goal_type == GoalType.OWN_GOAL else "⚽"
-            team_name = match.team_home.name if goal.team_id == match.team_home_id else match.team_away.name
+        for goal in sorted(match.goals, key=lambda g: g.scored_at):
+            marker = "⚽" if goal.goal_type == GoalType.GOAL else "🥅"
+            team_name = home if goal.team_id == match.team_home_id else away
             own = " (авт.)" if goal.goal_type == GoalType.OWN_GOAL else ""
             lines.append(f"  {marker} {goal.player.name}{own} [{team_name}]")
 
-        # Карточки
-        for card in match.cards:
+        for card in sorted(match.cards, key=lambda c: c.issued_at):
             emoji = "🟡" if card.card_type == CardType.YELLOW else "🔴"
-            team_name = match.team_home.name if card.team_id == match.team_home_id else match.team_away.name
-            lines.append(f"  {emoji} {card.player.name} [{team_name}]")
+            lines.append(f"  {emoji} {card.player.name}")
 
     await call.message.edit_text("\n".join(lines), reply_markup=main_menu_kb())
 
