@@ -4,16 +4,36 @@ from app.database.models import GameDay
 
 
 def join_game_kb(game_day_id: int, is_open: bool) -> InlineKeyboardMarkup:
+    """Кнопки анонса игры — Записаться ведёт к экрану подтверждения с Регламентом."""
     builder = InlineKeyboardBuilder()
     if is_open:
         builder.row(
-            InlineKeyboardButton(text="✅ Записаться", callback_data=f"join:{game_day_id}"),
+            InlineKeyboardButton(
+                text="✅ Записаться",
+                callback_data=f"join_pre:{game_day_id}"   # → экран согласия с регламентом
+            ),
             InlineKeyboardButton(text="❌ Не пойду", callback_data=f"decline:{game_day_id}"),
         )
     else:
         builder.row(
             InlineKeyboardButton(text="🔒 Набор закрыт", callback_data="closed"),
         )
+    return builder.as_markup()
+
+
+def join_confirm_kb(game_day_id: int) -> InlineKeyboardMarkup:
+    """Подтверждение регистрации + ссылка на Регламент."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="📜 Читать Регламент",
+            url="https://t.me/football_manager_2026_bot?start=rules"
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(text="✅ Согласен, записаться", callback_data=f"join:{game_day_id}"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"decline_pre:{game_day_id}"),
+    )
     return builder.as_markup()
 
 

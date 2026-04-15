@@ -1,5 +1,5 @@
 from aiogram import Router
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import Player, POSITION_LABELS
 from app.keyboards.main_menu import main_menu_kb, admin_menu_kb
+from app.data.reglament import REGLAMENT_PART1, REGLAMENT_PART2
 
 router = Router()
 
@@ -26,8 +27,15 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, player: Player | None, state: FSMContext):
-    await state.clear()  # Сбросить любой активный FSM
+async def cmd_start(message: Message, player: Player | None, state: FSMContext,
+                    command: CommandObject = None):
+    await state.clear()
+
+    # deep link: t.me/bot?start=rules
+    if command and command.args == "rules":
+        await _send_reglament(message)
+        return
+
     if player is None:
         await message.answer(
             "👋 Привет! Добро пожаловать в <b>Football Manager Bot</b>!\n\n"
@@ -41,10 +49,31 @@ async def cmd_start(message: Message, player: Player | None, state: FSMContext):
         f"📍 Позиция: {POSITION_LABELS[player.position]}\n"
         f"⭐ Рейтинг: {player.rating:.1f}"
         + (" <i>(провизорный)</i>" if player.rating_provisional else "")
-        + f"\n💰 Баланс: {player.balance} руб.\n\n"
+        + f"\n💰 Баланс: {player.balance} сум.\n\n"
         f"Выбери действие:",
         reply_markup=main_menu_kb()
     )
+
+
+async def _send_reglament(target):
+    """Отправить Регламент двумя сообщениями (обходим лимит 4096 символов)."""
+    if isinstance(target, CallbackQuery):
+        send = target.message.answer
+    else:
+        send = target.answer
+    await send(REGLAMENT_PART1, disable_web_page_preview=True)
+    await send(REGLAMENT_PART2)
+
+
+@router.message(Command("rules"))
+async def cmd_rules(message: Message):
+    await _send_reglament(message)
+
+
+@router.callback_query(lambda c: c.data == "reglament")
+async def cb_reglament(call: CallbackQuery):
+    await call.answer()
+    await _send_reglament(call)
 
 
 @router.message(Command("admin"))

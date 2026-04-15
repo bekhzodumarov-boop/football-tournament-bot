@@ -12,7 +12,8 @@ from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
     Player, MatchFormat
 )
-from app.keyboards.game_day import join_game_kb, game_day_action_kb
+from app.keyboards.game_day import join_game_kb, join_confirm_kb, game_day_action_kb
+from app.data.reglament import REGLAMENT_AGREEMENT
 
 router = Router()
 
@@ -78,6 +79,31 @@ async def show_next_game(event, session: AsyncSession, player: Player | None):
     )
 
     await send(text, reply_markup=join_game_kb(game_day.id, game_day.is_open))
+
+
+# ---------- Предварительный экран — согласие с Регламентом ----------
+
+@router.callback_query(F.data.startswith("join_pre:"))
+async def join_pre(call: CallbackQuery, player: Player | None):
+    await call.answer()
+    game_day_id = int(call.data.split(":")[1])
+
+    if not player:
+        await call.message.answer("❌ Сначала зарегистрируйся: /register")
+        return
+
+    await call.message.edit_text(
+        f"⚽ <b>Регистрация на игру</b>\n\n"
+        f"{REGLAMENT_AGREEMENT}",
+        reply_markup=join_confirm_kb(game_day_id)
+    )
+
+
+@router.callback_query(F.data.startswith("decline_pre:"))
+async def decline_pre(call: CallbackQuery):
+    """Отмена на экране согласия — вернуться к анонсу."""
+    await call.answer("Отменено")
+    await call.message.delete()
 
 
 # ---------- Записаться ----------
