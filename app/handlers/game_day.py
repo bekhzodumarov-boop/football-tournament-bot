@@ -201,10 +201,10 @@ async def create_gd_date(message: Message, state: FSMContext):
         await message.answer("❌ Неверный формат. Попробуй: <code>25.04.2026 18:00</code>")
         return
 
-    await state.update_data(scheduled_at=dt)
+    await state.update_data(scheduled_at=dt.isoformat())  # строка, не datetime (JSON)
     await message.answer(
         f"✅ Дата: <b>{dt.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
-        "Введи адрес площадки:"
+        "Введи адрес площадки:\n<i>Отмена: /cancel</i>"
     )
     await state.set_state(CreateGameDayFSM.waiting_location)
 
@@ -252,10 +252,11 @@ async def create_gd_cost(message: Message, state: FSMContext, session: AsyncSess
         return
 
     data = await state.get_data()
-    deadline = data["scheduled_at"] - timedelta(hours=settings.REGISTRATION_DEADLINE_HOURS)
+    scheduled_at = datetime.fromisoformat(data["scheduled_at"])  # обратно в datetime
+    deadline = scheduled_at - timedelta(hours=settings.REGISTRATION_DEADLINE_HOURS)
 
     game_day = GameDay(
-        scheduled_at=data["scheduled_at"],
+        scheduled_at=scheduled_at,
         location=data["location"],
         player_limit=data["player_limit"],
         cost_per_player=cost,
