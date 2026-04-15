@@ -7,6 +7,8 @@ from aiogram.types import Message, CallbackQuery
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aiogram import Bot
+
 from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
@@ -14,6 +16,7 @@ from app.database.models import (
 )
 from app.keyboards.game_day import join_game_kb, join_confirm_kb, game_day_action_kb
 from app.data.reglament import REGLAMENT_AGREEMENT
+from app.reminders import schedule_reminders
 
 router = Router()
 
@@ -118,8 +121,8 @@ async def join_game(call: CallbackQuery, session: AsyncSession, player: Player |
         return
 
     game_day = await session.get(GameDay, game_day_id)
-    if not game_day or not game_day.is_open:
-        await call.message.answer("❌ Запись закрыта или мест нет.")
+    if not game_day:
+        await call.message.answer("❌ Игровой день не найден.")
         return
 
     # Проверить долг
@@ -143,6 +146,43 @@ async def join_game(call: CallbackQuery, session: AsyncSession, player: Player |
         await call.answer("Ты уже записан!", show_alert=True)
         return
 
+    # --- Проверка мест ---
+    registered = sum(1 for a in game_day.attendances if a.response == AttendanceResponse.YES)
+    is_full = registered >= game_day.player_limit
+
+    if is_full and game_day.status == GameDayStatus.ANNOUNCED:
+        # Добавить в лист ожидания
+        waitlist_count = sum(
+            1 for a in game_day.attendances
+            if a.response == AttendanceResponse.WAITLIST
+        )
+        my_position = waitlist_count + 1
+
+        if existing:
+            existing.response = AttendanceResponse.WAITLIST
+            existing.responded_at = datetime.now()
+        else:
+            session.add(Attendance(
+                game_day_id=game_day_id,
+                player_id=player.id,
+                response=AttendanceResponse.WAITLIST,
+                responded_at=datetime.now()
+            ))
+        await session.commit()
+
+        await call.message.edit_text(
+            f"📋 <b>Мест нет — ты в листе ожидания</b>\n\n"
+            f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
+            f"📍 {game_day.location}\n\n"
+            f"🔢 Твоя позиция: <b>#{my_position}</b>\n\n"
+            "Если кто-то откажется — ты получишь уведомление!"
+        )
+        return
+
+    if not game_day.is_open:
+        await call.message.answer("❌ Запись закрыта.")
+        return
+
     if existing:
         existing.response = AttendanceResponse.YES
         existing.responded_at = datetime.now()
@@ -157,12 +197,12 @@ async def join_game(call: CallbackQuery, session: AsyncSession, player: Player |
 
     await session.commit()
 
-    registered = sum(1 for a in game_day.attendances if a.response == AttendanceResponse.YES) + 1
+    registered_new = registered + 1
     await call.message.edit_text(
         f"✅ <b>Ты записан!</b>\n\n"
         f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
         f"📍 {game_day.location}\n"
-        f"👥 Записано: {registered}/{game_day.player_limit}\n\n"
+        f"👥 Записано: {registered_new}/{game_day.player_limit}\n\n"
         "До встречи на поле! ⚽"
     )
 
@@ -170,7 +210,8 @@ async def join_game(call: CallbackQuery, session: AsyncSession, player: Player |
 # ---------- Отказ от игры ----------
 
 @router.callback_query(F.data.startswith("decline:"))
-async def decline_game(call: CallbackQuery, session: AsyncSession, player: Player | None):
+async def decline_game(call: CallbackQuery, session: AsyncSession,
+                       player: Player | None, bot: Bot):
     await call.answer()
     game_day_id = int(call.data.split(":")[1])
 
@@ -185,20 +226,59 @@ async def decline_game(call: CallbackQuery, session: AsyncSession, player: Playe
     )
     existing = result.scalar_one_or_none()
 
+    was_confirmed = existing and existing.response == AttendanceResponse.YES
+
     if existing:
         existing.response = AttendanceResponse.NO
         existing.responded_at = datetime.now()
     else:
-        att = Attendance(
+        session.add(Attendance(
             game_day_id=game_day_id,
             player_id=player.id,
             response=AttendanceResponse.NO,
             responded_at=datetime.now()
-        )
-        session.add(att)
+        ))
 
     await session.commit()
     await call.message.edit_text("❌ Понял, ты не придёшь. Увидимся в следующий раз!")
+
+    # Уведомить первого из вейтлиста если освободилось место
+    if was_confirmed:
+        await _notify_first_waitlist(session, game_day_id, bot)
+
+
+async def _notify_first_waitlist(session: AsyncSession, game_day_id: int, bot: Bot):
+    """Уведомить первого игрока из листа ожидания об освободившемся месте."""
+    from sqlalchemy.orm import selectinload
+    result = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.WAITLIST,
+        )
+        .order_by(Attendance.responded_at)
+        .limit(1)
+    )
+    first = result.scalar_one_or_none()
+    if not first:
+        return
+
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        return
+
+    try:
+        await bot.send_message(
+            first.player.telegram_id,
+            f"🎉 <b>Место освободилось!</b>\n\n"
+            f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
+            f"📍 {game_day.location}\n\n"
+            "Ты первый в листе ожидания. Хочешь записаться?",
+            reply_markup=join_game_kb(game_day_id, game_day.is_open)
+        )
+    except Exception:
+        pass
 
 
 # ---------- Админ: создание игрового дня ----------
@@ -293,6 +373,9 @@ async def create_gd_cost(message: Message, state: FSMContext, session: AsyncSess
     await session.commit()
     await session.refresh(game_day)
     await state.clear()
+
+    # Запланировать автонапоминания за 24ч и 2ч
+    schedule_reminders(game_day)
 
     await message.answer(
         f"✅ <b>Игровой день создан!</b>\n\n"

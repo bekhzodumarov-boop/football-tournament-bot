@@ -198,3 +198,13 @@ def sub_player_in_kb(match_id: int, team_id: int, player_out_id: int,
     builder.adjust(2)
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"ref_match:{match_id}"))
     return builder.as_markup()
+
+
+def pick_format_kb() -> InlineKeyboardMarkup:
+    """Выбор формата матча: по времени или до N голов."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="⏱ По времени", callback_data="ref_fmt:time"),
+        InlineKeyboardButton(text="🥅 До N голов", callback_data="ref_fmt:goals"),
+    )
+    return builder.as_markup()

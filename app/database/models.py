@@ -45,6 +45,7 @@ class AttendanceResponse(str, PyEnum):
     NO = "no"
     MAYBE = "maybe"
     NO_RESPONSE = "no_response"
+    WAITLIST = "waitlist"   # лист ожидания (мест нет)
 
 class MatchStatus(str, PyEnum):
     SCHEDULED = "scheduled"
@@ -188,6 +189,7 @@ class Match(Base):
     status: Mapped[MatchStatus] = mapped_column(Enum(MatchStatus), default=MatchStatus.SCHEDULED)
     match_format: Mapped[MatchFormat] = mapped_column(Enum(MatchFormat), default=MatchFormat.TIME)
     duration_min: Mapped[int] = mapped_column(Integer, default=20)
+    goals_to_win: Mapped[int] = mapped_column(Integer, default=3)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 

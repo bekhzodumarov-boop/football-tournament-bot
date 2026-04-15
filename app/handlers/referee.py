@@ -26,7 +26,7 @@ from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus,
     Attendance, AttendanceResponse,
-    Team, TeamPlayer, Match, MatchStatus,
+    Team, TeamPlayer, Match, MatchStatus, MatchFormat,
     Goal, GoalType,
     Card, CardType,
     Player,
@@ -35,7 +35,7 @@ from app.keyboards.referee import (
     referee_gamedays_kb, referee_gd_kb, referee_match_kb,
     select_team_kb, select_player_kb, confirm_finish_kb,
     team_players_select_kb, teams_list_kb, pick_team_kb,
-    sub_player_out_kb, sub_player_in_kb,
+    sub_player_out_kb, sub_player_in_kb, pick_format_kb,
 )
 from app.scheduler import scheduler
 
@@ -50,15 +50,18 @@ _active_timers: dict[int, dict] = {}
 # ─────────────────────────────────────────────
 
 class RefereeMatchFSM(StatesGroup):
-    # Ручной ввод команд (старый поток — когда нет заранее созданных команд)
+    # Ручной ввод команд (когда нет заранее созданных команд)
     waiting_team1 = State()
     waiting_team1_players = State()
     waiting_team2 = State()
     waiting_team2_players = State()
-    waiting_duration = State()
     # Выбор из существующих команд
     waiting_pick_team1 = State()
     waiting_pick_team2 = State()
+    # Общие шаги (оба потока)
+    waiting_format = State()       # выбор формата: время / голы
+    waiting_duration = State()     # минуты (формат TIME)
+    waiting_goals_count = State()  # кол-во голов (формат GOALS)
 
 
 class RefereeTeamSetupFSM(StatesGroup):
@@ -469,14 +472,13 @@ async def ref_team_players_done(call: CallbackQuery, state: FSMContext,
         )
     else:
         await state.update_data(team2_player_ids=selected, selected_player_ids=[])
-        await state.set_state(RefereeMatchFSM.waiting_duration)
+        await state.set_state(RefereeMatchFSM.waiting_format)
 
         team2_name = data.get("team2_name", "Команда 2")
         await call.message.edit_text(
             f"✅ <b>{team2_name}</b>: {len(selected)} игроков выбрано\n\n"
-            f"Шаг 5 из 5\n\n"
-            "Длительность матча (в минутах)?\n"
-            "<i>Введи число, например: 6</i>"
+            f"Шаг 5 из 5\n\nВыбери формат матча:",
+            reply_markup=pick_format_kb()
         )
 
 
@@ -519,17 +521,26 @@ async def ref_duration(message: Message, state: FSMContext, session: AsyncSessio
         await message.answer("❌ Введи число от 1 до 120:")
         return
 
+    await state.update_data(duration_min=duration)
+    await _create_match_from_state(message, state, session)
+
+
+async def _create_match_from_state(message: Message, state: FSMContext,
+                                   session: AsyncSession):
+    """Создать матч из данных FSM (общий для обоих форматов и потоков)."""
     data = await state.get_data()
     await state.clear()
 
     game_day_id = data["game_day_id"]
     flow = data.get("flow", "manual")
+    fmt_str = data.get("match_format", "time")
+    match_fmt = MatchFormat.GOALS if fmt_str == "goals" else MatchFormat.TIME
+    duration = data.get("duration_min", 20)
+    goals_to_win = data.get("goals_to_win", 3)
 
     if flow == "existing":
-        # Поток с существующими командами — просто создаём матч
         team1_id = data["existing_team1_id"]
         team2_id = data["existing_team2_id"]
-
         team1 = await session.get(Team, team1_id)
         team2 = await session.get(Team, team2_id)
 
@@ -537,23 +548,27 @@ async def ref_duration(message: Message, state: FSMContext, session: AsyncSessio
             game_day_id=game_day_id,
             team_home_id=team1_id,
             team_away_id=team2_id,
-            match_format="time",
+            match_format=match_fmt,
             duration_min=duration,
+            goals_to_win=goals_to_win,
             status=MatchStatus.SCHEDULED,
         )
         session.add(match)
         await session.commit()
         match = await _load_match(session, match.id)
 
+        fmt_line = (
+            f"⏱ Длительность: {duration} мин." if match_fmt == MatchFormat.TIME
+            else f"🥅 До {goals_to_win} голов"
+        )
         await message.answer(
             f"✅ <b>Матч создан!</b>\n\n"
             f"{team1.color_emoji} {team1.name} vs {team2.color_emoji} {team2.name}\n"
-            f"⏱ Длительность: {duration} мин.\n\n"
+            f"{fmt_line}\n\n"
             "Используй кнопки для управления матчем:",
             reply_markup=referee_match_kb(match.id, is_started=False, is_finished=False)
         )
     else:
-        # Ручной поток — создать новые команды
         team1_name = data["team1_name"]
         team2_name = data["team2_name"]
         team1_player_ids: list[int] = data.get("team1_player_ids", [])
@@ -573,19 +588,24 @@ async def ref_duration(message: Message, state: FSMContext, session: AsyncSessio
             game_day_id=game_day_id,
             team_home_id=team1.id,
             team_away_id=team2.id,
-            match_format="time",
+            match_format=match_fmt,
             duration_min=duration,
+            goals_to_win=goals_to_win,
             status=MatchStatus.SCHEDULED,
         )
         session.add(match)
         await session.commit()
         match = await _load_match(session, match.id)
 
+        fmt_line = (
+            f"⏱ Длительность: {duration} мин." if match_fmt == MatchFormat.TIME
+            else f"🥅 До {goals_to_win} голов"
+        )
         await message.answer(
             f"✅ <b>Матч создан!</b>\n\n"
             f"🔴 {team1_name} ({len(team1_player_ids)} чел.) vs "
             f"🔵 {team2_name} ({len(team2_player_ids)} чел.)\n"
-            f"⏱ Длительность: {duration} мин.\n\n"
+            f"{fmt_line}\n\n"
             "Используй кнопки для управления матчем:",
             reply_markup=referee_match_kb(match.id, is_started=False, is_finished=False)
         )
@@ -767,6 +787,20 @@ async def ref_goal_record(call: CallbackQuery, session: AsyncSession,
     else:
         match.score_away += 1
 
+    # Автофиниш при формате "до N голов"
+    auto_finished = False
+    if match.match_format == MatchFormat.GOALS:
+        winning_score = max(match.score_home, match.score_away)
+        if winning_score >= match.goals_to_win:
+            match.status = MatchStatus.FINISHED
+            match.finished_at = datetime.now()
+            auto_finished = True
+            try:
+                scheduler.remove_job(f"timer_tick_{match_id}")
+            except Exception:
+                pass
+            _active_timers.pop(match_id, None)
+
     await session.commit()
     match = await _load_match(session, match_id)
 
@@ -774,13 +808,18 @@ async def ref_goal_record(call: CallbackQuery, session: AsyncSession,
         _active_timers[match_id]["score_home"] = match.score_home
         _active_timers[match_id]["score_away"] = match.score_away
 
-    await call.answer(f"✅ Гол! {scorer.name}", show_alert=True)
+    if auto_finished:
+        winner = match.team_home.name if match.score_home > match.score_away else match.team_away.name
+        await call.answer(f"🏆 {winner} побеждает!", show_alert=True)
+    else:
+        await call.answer(f"✅ Гол! {scorer.name}", show_alert=True)
+
     await call.message.edit_text(
         _match_panel_text(match),
         reply_markup=referee_match_kb(
             match_id,
             is_started=match.status == MatchStatus.IN_PROGRESS,
-            is_finished=False,
+            is_finished=match.status == MatchStatus.FINISHED,
         )
     )
 
@@ -1057,6 +1096,55 @@ async def noop(call: CallbackQuery):
 
 
 # ─────────────────────────────────────────────
+#  Выбор формата матча
+# ─────────────────────────────────────────────
+
+@router.callback_query(
+    F.data.startswith("ref_fmt:"),
+    StateFilter(RefereeMatchFSM.waiting_format)
+)
+async def ref_pick_format(call: CallbackQuery, state: FSMContext, player: Player | None):
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    fmt = call.data.split(":")[1]   # "time" или "goals"
+    await state.update_data(match_format=fmt)
+
+    if fmt == "time":
+        await state.set_state(RefereeMatchFSM.waiting_duration)
+        await call.message.edit_text(
+            "⏱ <b>Формат: по времени</b>\n\n"
+            "Длительность матча (в минутах)?\n"
+            "<i>Введи число, например: 6</i>"
+        )
+    else:
+        await state.set_state(RefereeMatchFSM.waiting_goals_count)
+        await call.message.edit_text(
+            "🥅 <b>Формат: до N голов</b>\n\n"
+            "Сколько голов нужно забить для победы?\n"
+            "<i>Введи число, например: 3</i>"
+        )
+
+
+@router.message(RefereeMatchFSM.waiting_goals_count)
+async def ref_goals_count(message: Message, state: FSMContext, session: AsyncSession):
+    try:
+        n = int(message.text.strip())
+        if n < 1 or n > 20:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи число от 1 до 20:")
+        return
+
+    await state.update_data(goals_to_win=n)
+    # Создать матч сразу (duration_min не нужен для этого формата, ставим 0)
+    await state.update_data(duration_min=0)
+    await _create_match_from_state(message, state, session)
+
+
+# ─────────────────────────────────────────────
 #  Выбор из существующих команд (создание матча)
 # ─────────────────────────────────────────────
 
@@ -1106,7 +1194,7 @@ async def ref_pick_team2(call: CallbackQuery, state: FSMContext,
     team2_id = int(team2_id_str)
 
     await state.update_data(existing_team2_id=team2_id)
-    await state.set_state(RefereeMatchFSM.waiting_duration)
+    await state.set_state(RefereeMatchFSM.waiting_format)
 
     data = await state.get_data()
     team1 = await session.get(Team, data["existing_team1_id"])
@@ -1114,8 +1202,8 @@ async def ref_pick_team2(call: CallbackQuery, state: FSMContext,
 
     await call.message.edit_text(
         f"✅ {team1.color_emoji} {team1.name} vs {team2.color_emoji} {team2.name}\n\n"
-        "Шаг 3 из 3\n\nДлительность матча (в минутах)?\n"
-        "<i>Введи число, например: 6</i>"
+        "Шаг 3 из 3\n\nВыбери формат матча:",
+        reply_markup=pick_format_kb()
     )
 
 

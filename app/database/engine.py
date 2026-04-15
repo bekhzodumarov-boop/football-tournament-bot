@@ -66,6 +66,10 @@ async def _run_migrations(conn):
             await conn.execute(text(
                 "ALTER TABLE matches ADD COLUMN duration_min INTEGER NOT NULL DEFAULT 20"
             ))
+        if "goals_to_win" not in match_cols:
+            await conn.execute(text(
+                "ALTER TABLE matches ADD COLUMN goals_to_win INTEGER NOT NULL DEFAULT 3"
+            ))
     else:
         # PostgreSQL поддерживает IF NOT EXISTS
         await conn.execute(text(
@@ -76,6 +80,13 @@ async def _run_migrations(conn):
         ))
         await conn.execute(text(
             "ALTER TABLE matches ADD COLUMN IF NOT EXISTS duration_min INTEGER NOT NULL DEFAULT 20"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE matches ADD COLUMN IF NOT EXISTS goals_to_win INTEGER NOT NULL DEFAULT 3"
+        ))
+        # Добавить новое значение в PostgreSQL enum (WAITLIST)
+        await conn.execute(text(
+            "ALTER TYPE attendanceresponse ADD VALUE IF NOT EXISTS 'waitlist'"
         ))
 
 

@@ -11,6 +11,7 @@ from app.database.engine import create_db_and_tables
 from app.handlers import register_all_handlers
 from app.middlewares.auth import AuthMiddleware
 from app.scheduler import scheduler
+from app.reminders import set_bot, reschedule_all_reminders
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -49,9 +50,14 @@ async def main():
     await create_db_and_tables()
     logger.info("Database ready")
 
-    # Запустить планировщик (таймеры матчей)
+    # Запустить планировщик (таймеры матчей + напоминания)
     scheduler.start()
     logger.info("Scheduler started")
+
+    # Передать бота модулю напоминаний и восстановить jobs после рестарта
+    set_bot(bot)
+    await reschedule_all_reminders()
+    logger.info("Reminders rescheduled")
 
     # Уведомить Админа о запуске
     for admin_id in settings.ADMIN_IDS:
