@@ -187,7 +187,8 @@ async def admin_create_gameday_start(call: CallbackQuery, state: FSMContext):
         "📅 <b>Создание игрового дня</b>\n\n"
         "Введи дату и время игры в формате:\n"
         "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n\n"
-        "Например: <code>25.04.2026 18:00</code>"
+        "Например: <code>28.04.2026 19:00</code>\n\n"
+        "<i>Отмена: /cancel</i>"
     )
     await state.set_state(CreateGameDayFSM.waiting_date)
 

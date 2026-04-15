@@ -1,5 +1,6 @@
 from aiogram import Router
 from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,8 +11,23 @@ from app.keyboards.main_menu import main_menu_kb, admin_menu_kb
 router = Router()
 
 
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    """Отмена любого активного действия / выход из FSM"""
+    current = await state.get_state()
+    if current is None:
+        await message.answer("Нечего отменять. Ты в главном меню /start")
+        return
+    await state.clear()
+    await message.answer(
+        "❌ Действие отменено.\n\n"
+        "Используй /start для главного меню или /admin для Админки."
+    )
+
+
 @router.message(CommandStart())
-async def cmd_start(message: Message, player: Player | None):
+async def cmd_start(message: Message, player: Player | None, state: FSMContext):
+    await state.clear()  # Сбросить любой активный FSM
     if player is None:
         await message.answer(
             "👋 Привет! Добро пожаловать в <b>Football Manager Bot</b>!\n\n"
@@ -32,7 +48,8 @@ async def cmd_start(message: Message, player: Player | None):
 
 
 @router.message(Command("admin"))
-async def cmd_admin(message: Message, player: Player | None):
+async def cmd_admin(message: Message, player: Player | None, state: FSMContext):
+    await state.clear()  # Сбросить любой активный FSM
     if not settings.is_admin(message.from_user.id):
         await message.answer("⛔ У тебя нет доступа к Админке.")
         return
