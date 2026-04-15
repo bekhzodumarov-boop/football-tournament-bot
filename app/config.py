@@ -17,6 +17,14 @@ class Settings(BaseSettings):
     DEFAULT_COST: int = 0
     REGISTRATION_DEADLINE_HOURS: int = 3
 
+    # Telegram WebApp — публичный URL этого Railway-сервиса
+    # Пример: https://football-bot-production.railway.app
+    WEBAPP_URL: str = ""
+
+    # Google Sheets — JSON-строка сервисного аккаунта и ID таблицы
+    GOOGLE_CREDENTIALS_JSON: str = ""
+    GOOGLE_SHEET_ID: str = ""
+
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod
     def parse_admin_ids(cls, v):

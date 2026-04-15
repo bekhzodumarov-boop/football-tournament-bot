@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -12,6 +14,7 @@ from app.handlers import register_all_handlers
 from app.middlewares.auth import AuthMiddleware
 from app.scheduler import scheduler
 from app.reminders import set_bot, reschedule_all_reminders
+from app.webapp import create_webapp
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -50,6 +53,15 @@ async def main():
     await create_db_and_tables()
     logger.info("Database ready")
 
+    # Запустить веб-сервер (WebApp + API)
+    port = int(os.getenv("PORT", 8080))
+    webapp = create_webapp()
+    runner = web.AppRunner(webapp)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"WebApp server started on port {port}")
+
     # Запустить планировщик (таймеры матчей + напоминания)
     scheduler.start()
     logger.info("Scheduler started")
@@ -72,6 +84,7 @@ async def main():
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         scheduler.shutdown(wait=False)
+        await runner.cleanup()
         await bot.session.close()
         logger.info("Bot stopped")
 

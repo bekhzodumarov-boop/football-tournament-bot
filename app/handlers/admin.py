@@ -516,3 +516,47 @@ async def adm_back_to_menu(call: CallbackQuery):
         "🔧 <b>Панель администратора</b>\n\nВыбери действие:",
         reply_markup=admin_menu_kb()
     )
+
+
+# ══════════════════════════════════════════════════════
+#  ЭКСПОРТ В GOOGLE SHEETS
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_export_sheets")
+async def adm_export_sheets(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    if not settings.GOOGLE_CREDENTIALS_JSON or not settings.GOOGLE_SHEET_ID:
+        await call.message.answer(
+            "⚙️ <b>Экспорт в Google Sheets не настроен</b>\n\n"
+            "Чтобы включить экспорт:\n\n"
+            "1. Зайди на <a href='https://console.cloud.google.com'>console.cloud.google.com</a>\n"
+            "2. Создай проект → включи <b>Google Sheets API</b>\n"
+            "3. Создай <b>Сервисный аккаунт</b> → скачай JSON-ключ\n"
+            "4. В Railway добавь переменные:\n"
+            "   <code>GOOGLE_CREDENTIALS_JSON</code> = содержимое JSON-файла\n"
+            "   <code>GOOGLE_SHEET_ID</code> = ID из URL таблицы\n"
+            "5. Создай Google-таблицу и открой доступ сервисному аккаунту\n\n"
+            "<i>Email сервисного аккаунта указан в JSON в поле client_email</i>",
+            disable_web_page_preview=True
+        )
+        return
+
+    await call.message.answer("⏳ Экспортирую данные в Google Sheets…")
+
+    try:
+        from app.google_sheets import export_to_sheets
+        url = await export_to_sheets(session)
+        await call.message.answer(
+            f"✅ <b>Экспорт завершён!</b>\n\n"
+            f"📊 Данные обновлены в таблице:\n{url}\n\n"
+            "Листы: 📊 Таблица · ⚽ Матчи · 👥 Игроки"
+        )
+    except Exception as e:
+        await call.message.answer(
+            f"❌ <b>Ошибка экспорта:</b>\n<code>{e}</code>\n\n"
+            "Проверь правильность GOOGLE_CREDENTIALS_JSON и GOOGLE_SHEET_ID."
+        )

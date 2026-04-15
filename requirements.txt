@@ -8,3 +8,4 @@ apscheduler>=3.10.4
 pydantic-settings>=2.2.1
 python-dotenv>=1.0.1
 pillow>=11.0.0
+gspread>=6.0.0

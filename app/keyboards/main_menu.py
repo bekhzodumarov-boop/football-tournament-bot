@@ -1,5 +1,7 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from app.config import settings
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
@@ -15,9 +17,19 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📋 Результаты игр", callback_data="match_results"),
         InlineKeyboardButton(text="ℹ️ Мой профиль", callback_data="my_profile"),
     )
-    builder.row(
-        InlineKeyboardButton(text="🏆 Таблица турнира", callback_data="tournament_standings"),
-    )
+    # Таблица: WebApp если URL задан, иначе обычная текстовая
+    if settings.WEBAPP_URL:
+        builder.row(
+            InlineKeyboardButton(text="🏆 Таблица турнира", callback_data="tournament_standings"),
+            InlineKeyboardButton(
+                text="🌐 Живая таблица",
+                web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/")
+            ),
+        )
+    else:
+        builder.row(
+            InlineKeyboardButton(text="🏆 Таблица турнира", callback_data="tournament_standings"),
+        )
     builder.row(
         InlineKeyboardButton(text="📜 Регламент турнира", callback_data="reglament"),
     )
@@ -36,6 +48,9 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="⭐ Рейтинг-голосование", callback_data="admin_rating_round"),
         InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="📤 Экспорт в Google Sheets", callback_data="admin_export_sheets"),
     )
     builder.row(
         InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"),
