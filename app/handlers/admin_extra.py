@@ -1260,12 +1260,31 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
     from app.database.models import POSITION_LABELS
     from app.keyboards.game_day import game_day_action_kb
 
-    # Если команды уже созданы — показываем состав
+    # Если команды уже созданы и в них есть игроки — показываем состав
     from app.database.models import TeamPlayer as TeamPlayerModel2
+    from sqlalchemy import delete as sql_delete_teams
     existing_res = await session.execute(
         select(TeamModel).where(TeamModel.game_day_id == game_day_id)
     )
     existing_teams = existing_res.scalars().all()
+
+    # Проверяем что в командах реально есть игроки
+    teams_have_players = False
+    if existing_teams:
+        from app.database.models import TeamPlayer as TPCheck
+        tp_check = await session.execute(
+            select(TPCheck).where(
+                TPCheck.team_id.in_([t.id for t in existing_teams])
+            ).limit(1)
+        )
+        teams_have_players = tp_check.scalar_one_or_none() is not None
+
+    # Пустые команды (без игроков) — удаляем и даём создать заново
+    if existing_teams and not teams_have_players:
+        for t in existing_teams:
+            await session.delete(t)
+        await session.commit()
+        existing_teams = []
 
     if existing_teams:
         # Загружаем игроков отдельным запросом для надёжности
