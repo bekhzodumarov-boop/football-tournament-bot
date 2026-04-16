@@ -820,7 +820,7 @@ async def adm_rating_round_start(call: CallbackQuery, session: AsyncSession, bot
             await bot.send_message(
                 p.telegram_id,
                 f"⭐ <b>Рейтинг-голосование!</b>\n\n"
-                f"Оцени других игроков лиги от 1 до 5 ⭐\n"
+                f"Оцени других игроков лиги от 1 до 10.\n"
                 f"Твои оценки влияют на рейтинг участников.\n\n"
                 "<i>Займёт 1-2 минуты</i>",
                 reply_markup=vote_kb.as_markup()
@@ -865,17 +865,33 @@ async def rv_start_voting(call: CallbackQuery, state: FSMContext, session: Async
         await call.answer("❌ Ты не зарегистрирован.", show_alert=True)
         return
 
-    nominees_query = select(Player).where(
-        Player.status == PlayerStatus.ACTIVE,
-        Player.id != voter.id,
-    )
-    if voter.league_id:
-        nominees_query = nominees_query.where(Player.league_id == voter.league_id)
-    nominees_res = await session.execute(nominees_query.order_by(Player.name))
-    nominees = nominees_res.scalars().all()
+    # Если раунд привязан к игровому дню — оцениваем только участников этой игры
+    if round_.game_day_id:
+        att_res = await session.execute(
+            select(Attendance)
+            .options(selectinload(Attendance.player))
+            .where(
+                Attendance.game_day_id == round_.game_day_id,
+                Attendance.response == AttendanceResponse.YES,
+            )
+        )
+        nominees = [
+            att.player for att in att_res.scalars().all()
+            if att.player and att.player.id != voter.id
+        ]
+        nominees.sort(key=lambda p: p.name)
+    else:
+        nominees_query = select(Player).where(
+            Player.status == PlayerStatus.ACTIVE,
+            Player.id != voter.id,
+        )
+        if voter.league_id:
+            nominees_query = nominees_query.where(Player.league_id == voter.league_id)
+        nominees_res = await session.execute(nominees_query.order_by(Player.name))
+        nominees = nominees_res.scalars().all()
 
     if not nominees:
-        await call.message.edit_text("В лиге нет других игроков для оценки.")
+        await call.message.edit_text("Нет других игроков для оценки.")
         return
 
     # Сохранить список в FSM
@@ -899,13 +915,12 @@ async def _show_vote_nominee(msg, data: dict, edit: bool = False):
     scores = data.get("scores", {})
 
     builder = InlineKeyboardBuilder()
-    for star in range(1, 6):
-        emoji = "⭐" * star
-        current = scores.get(str(nominee["id"]))
-        mark = " ✅" if current == star else ""
+    current_score = scores.get(str(nominee["id"]))
+    for n in range(1, 11):
+        mark = " ✅" if current_score == n else ""
         builder.button(
-            text=f"{emoji}{mark}",
-            callback_data=f"rv_score:{data['round_id']}:{nominee['id']}:{star}"
+            text=f"{n}{mark}",
+            callback_data=f"rv_score:{data['round_id']}:{nominee['id']}:{n}"
         )
     builder.adjust(5)
 
@@ -924,11 +939,12 @@ async def _show_vote_nominee(msg, data: dict, edit: bool = False):
     elif all(str(n["id"]) in scores for n in nominees):
         builder.row(InlineKeyboardButton(text="✅ Отправить голоса", callback_data="rv_submit"))
 
+    current_display = str(scores[str(nominee["id"])]) if str(nominee["id"]) in scores else "<i>не выбрана</i>"
     text = (
         f"⭐ <b>Голосование</b> — {idx + 1}/{total}\n\n"
         f"👤 <b>{nominee['name']}</b>\n\n"
-        f"Твоя оценка: {('⭐' * scores[str(nominee['id'])]) if str(nominee['id']) in scores else '<i>не выбрана</i>'}\n\n"
-        f"<i>Оцени от 1 (слабо) до 5 (отлично)</i>"
+        f"Твоя оценка: <b>{current_display}</b>\n\n"
+        f"<i>Оцени от 1 (слабо) до 10 (отлично)</i>"
     )
 
     if edit:
@@ -1049,9 +1065,8 @@ async def rating_round_close(call: CallbackQuery, session: AsyncSession):
         player = await session.get(Player, nominee_id)
         if not player:
             continue
-        avg_vote = sum(vote_scores) / len(vote_scores)  # 1-5 scale
-        # Перевести в рейтинг 1-10: avg * 2
-        new_component = avg_vote * 2.0
+        avg_vote = sum(vote_scores) / len(vote_scores)  # 1-10 scale
+        new_component = avg_vote
         # Смешать: 60% старый рейтинг + 40% новый из голосования
         player.rating = round(player.rating * 0.6 + new_component * 0.4, 1)
         player.rating_provisional = False
@@ -1067,6 +1082,160 @@ async def rating_round_close(call: CallbackQuery, session: AsyncSession):
         f"📨 Голосов получено: <b>{len(round_.votes)}</b>\n\n"
         "Новые рейтинги применены к игрокам.",
         reply_markup=admin_menu_kb()
+    )
+
+
+# ══════════════════════════════════════════════════════
+#  ОПРОС РЕЙТИНГОВ ДЛЯ ИГРОВОГО ДНЯ
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("gd_rating_poll:"))
+async def gd_rating_poll_start(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    from datetime import datetime
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        return
+
+    # Проверить — нет ли уже активного раунда для этого игрового дня
+    existing_res = await session.execute(
+        select(RatingRound).where(
+            RatingRound.game_day_id == game_day_id,
+            RatingRound.status == "active",
+        )
+    )
+    existing = existing_res.scalar_one_or_none()
+    if existing:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(
+            text="🔒 Завершить и применить рейтинги",
+            callback_data=f"gd_rating_close:{existing.id}:{game_day_id}"
+        ))
+        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
+        await call.message.edit_text(
+            f"📊 <b>Опрос рейтингов уже активен</b>\n\n"
+            f"Игровой день: <b>{game_day.display_name}</b>\n"
+            f"Начат: {existing.started_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+            "Дождись ответов от игроков или завершите раунд вручную:",
+            reply_markup=builder.as_markup()
+        )
+        return
+
+    # Получить зарегистрированных игроков
+    att_res = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES,
+        )
+    )
+    attendances = att_res.scalars().all()
+    players = [att.player for att in attendances if att.player]
+
+    if len(players) < 2:
+        await call.answer("❌ Нужно минимум 2 зарегистрированных игрока.", show_alert=True)
+        return
+
+    # Создать раунд привязанный к игровому дню
+    round_ = RatingRound(
+        triggered_by=f"game_day:{game_day_id}",
+        game_day_id=game_day_id,
+        status="active",
+    )
+    session.add(round_)
+    await session.flush()
+    await session.commit()
+
+    # Разослать каждому участнику приглашение
+    vote_kb = InlineKeyboardBuilder()
+    vote_kb.row(InlineKeyboardButton(
+        text="⭐ Оценить игроков",
+        callback_data=f"rv_start:{round_.id}"
+    ))
+
+    sent = 0
+    for p in players:
+        try:
+            await bot.send_message(
+                p.telegram_id,
+                f"⭐ <b>Оцени игроков!</b>\n\n"
+                f"Перед делением на команды ({game_day.display_name}) "
+                f"оцени участников от 1 до 10.\n\n"
+                f"Это займёт 1–2 минуты и поможет сделать команды сбалансированнее.",
+                reply_markup=vote_kb.as_markup()
+            )
+            sent += 1
+        except Exception:
+            pass
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="🔒 Завершить и применить рейтинги",
+        callback_data=f"gd_rating_close:{round_.id}:{game_day_id}"
+    ))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
+
+    await call.message.edit_text(
+        f"📊 <b>Опрос запущен!</b>\n\n"
+        f"Игровой день: <b>{game_day.display_name}</b>\n"
+        f"📨 Уведомлено: <b>{sent}</b> из {len(players)} игроков\n\n"
+        "Когда все проголосуют — нажми «Завершить» для применения рейтингов.",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("gd_rating_close:"))
+async def gd_rating_close(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    from datetime import datetime
+
+    parts = call.data.split(":")
+    round_id = int(parts[1])
+    game_day_id = int(parts[2])
+
+    round_ = await session.get(RatingRound, round_id,
+                               options=[selectinload(RatingRound.votes)])
+    if not round_:
+        return
+
+    # Подсчитать средний рейтинг — шкала 1-10
+    votes_map: dict[int, list[int]] = {}
+    for v in round_.votes:
+        votes_map.setdefault(v.nominee_id, []).append(v.score)
+
+    updated = 0
+    for nominee_id, vote_scores in votes_map.items():
+        player = await session.get(Player, nominee_id)
+        if not player:
+            continue
+        avg_vote = sum(vote_scores) / len(vote_scores)  # 1-10
+        # Смешать: 60% старый рейтинг + 40% новый из голосования
+        player.rating = round(player.rating * 0.6 + avg_vote * 0.4, 1)
+        player.rating_provisional = False
+        updated += 1
+
+    round_.status = "finished"
+    round_.finished_at = datetime.now()
+    await session.commit()
+
+    from app.keyboards.game_day import game_day_action_kb
+    await call.message.edit_text(
+        f"✅ <b>Опрос завершён!</b>\n\n"
+        f"📊 Обновлено рейтингов: <b>{updated}</b>\n"
+        f"📨 Голосов получено: <b>{len(round_.votes)}</b>\n\n"
+        "Рейтинги обновлены. Теперь можно создать команды 🎲",
+        reply_markup=game_day_action_kb(game_day_id)
     )
 
 

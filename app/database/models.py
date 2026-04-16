@@ -265,6 +265,7 @@ class RatingRound(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     triggered_by: Mapped[str] = mapped_column(String(50))
+    game_day_id: Mapped[Optional[int]] = mapped_column(ForeignKey("game_days.id"), nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     deadline_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

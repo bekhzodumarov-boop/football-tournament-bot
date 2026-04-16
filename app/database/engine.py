@@ -88,6 +88,13 @@ async def _run_migrations(conn):
             await conn.execute(text(
                 "ALTER TABLE game_days ADD COLUMN tournament_number INTEGER"
             ))
+
+        result4 = await conn.execute(text("PRAGMA table_info(rating_rounds)"))
+        rr_cols = [row[1] for row in result4.fetchall()]
+        if "game_day_id" not in rr_cols:
+            await conn.execute(text(
+                "ALTER TABLE rating_rounds ADD COLUMN game_day_id INTEGER"
+            ))
     else:
         # PostgreSQL
         await conn.execute(text(
@@ -113,6 +120,9 @@ async def _run_migrations(conn):
         ))
         await conn.execute(text(
             "ALTER TABLE players ADD COLUMN IF NOT EXISTS phone VARCHAR(30)"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE rating_rounds ADD COLUMN IF NOT EXISTS game_day_id INTEGER REFERENCES game_days(id)"
         ))
 
 
