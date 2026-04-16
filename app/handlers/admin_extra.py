@@ -1362,17 +1362,31 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
         )
         return
 
-    await call.answer("⏳ Провожу жеребьёвку...")
+    await call.answer("⏳ Формирую команды...")
 
-    # ── Алгоритм балансировки ──────────────────────────────────────────
-    goalkeepers = sorted(
-        [p for p in players if p.position == Position.GK],
-        key=lambda p: p.rating, reverse=True
-    )
-    field_players = sorted(
-        [p for p in players if p.position != Position.GK],
-        key=lambda p: p.rating, reverse=True
-    )
+    # ── Алгоритм балансировки по позициям + рейтингу ───────────────────
+    # Принцип: snake draft отдельно для каждой позиции.
+    # Это гарантирует: одинаковые позиции распределяются равномерно,
+    # а внутри каждой позиции рейтинг выравнивается змейкой.
+
+    def snake_draft(group: list, buckets: list[list]) -> None:
+        """Распределяет group по buckets змейкой (0,1,...,n-1,n-1,...,0,...)"""
+        n = len(buckets)
+        if n == 0:
+            return
+        direction = 1
+        idx = 0
+        for player in group:
+            buckets[idx].append(player)
+            next_idx = idx + direction
+            if next_idx >= n:
+                direction = -1
+                idx = n - 1
+            elif next_idx < 0:
+                direction = 1
+                idx = 0
+            else:
+                idx = next_idx
 
     # Создать команды
     teams: list[TeamModel] = []
@@ -1386,35 +1400,22 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
         teams.append(team)
     await session.flush()  # нужен id команд
 
-    # Вратари — по одному на команду, лишние → в полевые
     team_players_buckets: list[list[Player]] = [[] for _ in range(num_teams)]
     gk_warnings: list[str] = []
 
-    for i, gk in enumerate(goalkeepers):
-        if i < num_teams:
-            team_players_buckets[i].append(gk)
-        else:
-            field_players.append(gk)
-            field_players.sort(key=lambda p: p.rating, reverse=True)
-
-    if len(goalkeepers) < num_teams:
-        missing = num_teams - len(goalkeepers)
-        gk_warnings.append(f"⚠️ Не хватает {missing} вратар{'я' if missing == 1 else 'ей'}!")
-
-    # Snake draft: 0,1,...,n-1,n-1,...,1,0,...
-    direction = 1
-    idx = 0
-    for player in field_players:
-        team_players_buckets[idx].append(player)
-        next_idx = idx + direction
-        if next_idx >= num_teams:
-            direction = -1
-            idx = num_teams - 1
-        elif next_idx < 0:
-            direction = 1
-            idx = 0
-        else:
-            idx = next_idx
+    # Распределяем каждую позицию отдельно, сортируя по рейтингу (убывание)
+    for pos in [Position.GK, Position.DEF, Position.MID, Position.FWD]:
+        group = sorted(
+            [p for p in players if p.position == pos],
+            key=lambda p: p.rating, reverse=True
+        )
+        if pos == Position.GK and len(group) < num_teams:
+            missing = num_teams - len(group)
+            gk_warnings.append(
+                f"⚠️ Вратарей {len(group)} на {num_teams} команды — "
+                f"{missing} команд{'а' if missing == 1 else 'ы' if missing < 5 else ''} без вратаря!"
+            )
+        snake_draft(group, team_players_buckets)
 
     # Сохранить TeamPlayer
     for i, team in enumerate(teams):
