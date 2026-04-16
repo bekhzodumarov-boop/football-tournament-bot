@@ -1,5 +1,5 @@
 from aiogram import Router, F, Bot
-from aiogram.filters import StateFilter
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -774,3 +774,41 @@ async def adm_export_sheets(call: CallbackQuery, session: AsyncSession):
             "Проверь правильность GOOGLE_CREDENTIALS_JSON и GOOGLE_SHEET_ID.",
             reply_markup=admin_menu_kb(),
         )
+
+
+
+# ── ВРЕМЕННАЯ КОМАНДА: очистить пустые команды ──────────────────────────
+@router.message(Command("fix_teams"))
+async def fix_empty_teams(message: Message, session: AsyncSession):
+    if not settings.is_admin(message.from_user.id):
+        return
+    from app.database.models import Team, TeamPlayer, Match, Goal, Card
+    from sqlalchemy import delete as _del
+
+    # Найти команды без игроков
+    tp_subq = select(TeamPlayer.team_id).distinct()
+    empty_res = await session.execute(
+        select(Team).where(Team.id.not_in(tp_subq))
+    )
+    empty_teams = empty_res.scalars().all()
+    if not empty_teams:
+        await message.answer("✅ Пустых команд нет.")
+        return
+
+    ids = [t.id for t in empty_teams]
+    names = ", ".join(f"{t.name} (id={t.id})" for t in empty_teams)
+
+    matches_res = await session.execute(
+        select(Match).where(
+            (Match.team_home_id.in_(ids)) | (Match.team_away_id.in_(ids))
+        )
+    )
+    mid = [m.id for m in matches_res.scalars().all()]
+    if mid:
+        await session.execute(_del(Goal).where(Goal.match_id.in_(mid)))
+        await session.execute(_del(Card).where(Card.match_id.in_(mid)))
+        await session.execute(_del(Match).where(Match.id.in_(mid)))
+    await session.execute(_del(Team).where(Team.id.in_(ids)))
+    await session.commit()
+
+    await message.answer(f"✅ Удалено {len(empty_teams)} пустых команд:\n{names}")
