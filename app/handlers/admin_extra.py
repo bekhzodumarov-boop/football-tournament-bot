@@ -1244,7 +1244,7 @@ async def gd_rating_close(call: CallbackQuery, session: AsyncSession):
 # ══════════════════════════════════════════════════════
 
 TEAM_COLORS = ["🔴", "🔵", "🟡", "🟢", "🟠", "🟣", "⚪", "⚫"]
-TEAM_NAMES = ["Красные", "Синие", "Жёлтые", "Зелёные", "Оранжевые", "Фиолетовые", "Белые", "Чёрные"]
+TEAM_NAMES  = ["A",   "B",   "C",   "D",   "E",   "F",   "G",   "H"]
 
 
 @router.callback_query(F.data.startswith("gd_auto_teams:"))
@@ -1303,7 +1303,7 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
 
 
 @router.callback_query(F.data.startswith("auto_teams_count:"))
-async def auto_teams_execute(call: CallbackQuery, session: AsyncSession):
+async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bot):
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
         return
@@ -1313,6 +1313,7 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession):
     )
     from app.database.models import POSITION_LABELS
     from sqlalchemy import delete as sql_delete
+    from app.keyboards.game_day import game_day_action_kb
 
     parts = call.data.split(":")
     game_day_id = int(parts[1])
@@ -1328,10 +1329,8 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession):
         )
     )
     attendances = result.scalars().all()
-    # Фильтруем None на случай удалённых игроков
     players: list[Player] = [att.player for att in attendances if att.player is not None]
 
-    # Проверка ДО call.answer — чтобы не вызывать его дважды
     if len(players) < num_teams:
         await call.answer(
             f"❌ Недостаточно игроков: {len(players)} записано, нужно минимум {num_teams}.",
@@ -1375,9 +1374,9 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession):
             )
             session.add(team)
             teams.append(team)
-        await session.flush()  # получить id
+        await session.flush()
 
-        # 3. Распределить вратарей: по одному на команду, остальные — в полевые
+        # 3. Вратари — по одному на команду, лишние — в полевые
         team_players_buckets: list[list[Player]] = [[] for _ in range(num_teams)]
         gk_warnings: list[str] = []
 
@@ -1392,8 +1391,7 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession):
             missing = num_teams - len(goalkeepers)
             gk_warnings.append(f"⚠️ Не хватает {missing} вратар{'я' if missing == 1 else 'ей'}!")
 
-        # 4. Snake draft полевых игроков по рейтингу
-        # Порядок: 0,1,2,...,n-1, n-1,...,1,0, 0,1,...
+        # 4. Snake draft полевых по рейтингу: 0,1,...,n-1,n-1,...,1,0,...
         direction = 1
         idx = 0
         for player in field_players:
@@ -1415,29 +1413,85 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession):
 
         await session.commit()
 
-        # ── Формирование результата ────────────────────────────────────
-        from app.keyboards.game_day import game_day_action_kb
+        # ── Рассылка каждому игроку ────────────────────────────────────
+        game_day = await session.get(GameDay, game_day_id)
+        gd_name = game_day.display_name if game_day else f"#{game_day_id}"
 
-        lines = ["🎲 <b>Команды созданы!</b>\n"]
+        sent = 0
+        for i, team in enumerate(teams):
+            bucket = team_players_buckets[i]
+            teammates = [p for p in bucket]
+
+            for player in bucket:
+                other_names = [p.name for p in teammates if p.id != player.id]
+                if other_names:
+                    teammates_text = ", ".join(other_names)
+                else:
+                    teammates_text = "пока никого нет"
+
+                try:
+                    await bot.send_message(
+                        player.telegram_id,
+                        f"⚽ <b>Команды на игру {gd_name} сформированы!</b>\n\n"
+                        f"Мы провели рандомную разбивку на команды с балансировкой по рейтингу и позициям.\n\n"
+                        f"Ты сегодня играешь в команде <b>{team.color_emoji} {team.name}</b>.\n\n"
+                        f"С тобой в команде играют: <b>{teammates_text}</b>\n\n"
+                        f"Удачи на игре! 🏆"
+                    )
+                    sent += 1
+                except Exception:
+                    pass
+
+        # ── Сводка для Админа ─────────────────────────────────────────
+        admin_lines = [f"🎲 <b>Команды сформированы!</b> ({gd_name})\n"]
         for i, team in enumerate(teams):
             bucket = team_players_buckets[i]
             avg_rating = sum(p.rating for p in bucket) / len(bucket) if bucket else 0
-            lines.append(f"\n{team.color_emoji} <b>{team.name}</b> (⭐{avg_rating:.1f}):")
+            admin_lines.append(f"\n{team.color_emoji} <b>Команда {team.name}</b> (⭐{avg_rating:.1f}):")
             for player in bucket:
                 pos = POSITION_LABELS.get(player.position, player.position)
-                lines.append(f"  • {player.name} — {pos}, ⭐{player.rating:.1f}")
+                admin_lines.append(f"  • {player.name} — {pos}")
 
         if gk_warnings:
-            lines.append("\n" + "\n".join(gk_warnings))
+            admin_lines.append("\n" + "\n".join(gk_warnings))
+        admin_lines.append(f"\n\n📨 Уведомлено игроков: <b>{sent}/{len(players)}</b>")
+
+        full_summary = "\n".join(admin_lines)
+
+        # Разослать полный список судьям и другим админам
+        referees_res = await session.execute(
+            select(Player).where(
+                Player.is_referee == True,
+                Player.status == PlayerStatus.ACTIVE,
+            )
+        )
+        referees = referees_res.scalars().all()
+        notified_ids = {call.from_user.id}  # не дублировать тому кто нажал кнопку
+        for ref in referees:
+            if ref.telegram_id in notified_ids:
+                continue
+            try:
+                await bot.send_message(ref.telegram_id, full_summary)
+                notified_ids.add(ref.telegram_id)
+            except Exception:
+                pass
+        # Остальные суперадмины из settings
+        for admin_tg_id in settings.ADMIN_IDS:
+            if admin_tg_id in notified_ids:
+                continue
+            try:
+                await bot.send_message(admin_tg_id, full_summary)
+                notified_ids.add(admin_tg_id)
+            except Exception:
+                pass
 
         await call.message.edit_text(
-            "\n".join(lines),
+            full_summary,
             reply_markup=game_day_action_kb(game_day_id)
         )
 
     except Exception as e:
         await session.rollback()
-        from app.keyboards.game_day import game_day_action_kb
         await call.message.edit_text(
             f"❌ <b>Ошибка при создании команд:</b>\n<code>{e}</code>",
             reply_markup=game_day_action_kb(game_day_id)
