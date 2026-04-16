@@ -1281,8 +1281,20 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
 
     # Пустые команды (без игроков) — удаляем и даём создать заново
     if existing_teams and not teams_have_players:
-        for t in existing_teams:
-            await session.delete(t)
+        from sqlalchemy import delete as _del
+        old_ids = [t.id for t in existing_teams]
+        # Каскад: голы → карточки → матчи → составы → команды
+        matches_res = await session.execute(
+            select(Match).where(
+                (Match.team_home_id.in_(old_ids)) | (Match.team_away_id.in_(old_ids))
+            )
+        )
+        old_match_ids = [m.id for m in matches_res.scalars().all()]
+        if old_match_ids:
+            await session.execute(_del(Goal).where(Goal.match_id.in_(old_match_ids)))
+            await session.execute(_del(Card).where(Card.match_id.in_(old_match_ids)))
+            await session.execute(_del(Match).where(Match.id.in_(old_match_ids)))
+        await session.execute(_del(TeamModel).where(TeamModel.id.in_(old_ids)))
         await session.commit()
         existing_teams = []
 
