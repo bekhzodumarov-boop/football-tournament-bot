@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import (
     Player, POSITION_LABELS,
-    GameDay, GameDayStatus, Match, MatchStatus, Team,
+    GameDay, GameDayStatus, Match, MatchStatus, Team, League,
 )
 from app.keyboards.main_menu import main_menu_kb, admin_menu_kb
 from app.data.reglament import REGLAMENT_PART1, REGLAMENT_PART2
@@ -33,12 +33,18 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, player: Player | None, state: FSMContext,
-                    command: CommandObject = None):
+                    session: AsyncSession, command: CommandObject = None):
     await state.clear()
 
     # deep link: t.me/bot?start=rules
     if command and command.args == "rules":
         await _send_reglament(message)
+        return
+
+    # deep link: t.me/bot?start=join_XXXXXXXX  (приглашение в лигу)
+    if command and command.args and command.args.startswith("join_"):
+        invite_code = command.args[5:]  # strip "join_"
+        await _handle_invite_link(message, player, state, session, invite_code)
         return
 
     if player is None:
@@ -58,6 +64,52 @@ async def cmd_start(message: Message, player: Player | None, state: FSMContext,
         f"Выбери действие:",
         reply_markup=main_menu_kb()
     )
+
+
+async def _handle_invite_link(
+    message: Message,
+    player: Player | None,
+    state: FSMContext,
+    session: AsyncSession,
+    invite_code: str,
+):
+    """Обрабатывает приглашение в лигу по ссылке /start join_XXXXXXXX."""
+    league_res = await session.execute(
+        select(League).where(League.invite_code == invite_code, League.is_active == True)
+    )
+    league = league_res.scalar_one_or_none()
+
+    if not league:
+        await message.answer(
+            "❌ Ссылка недействительна или лига не найдена.\n\n"
+            "Обратись к организатору за новой ссылкой."
+        )
+        return
+
+    if player is not None:
+        # Уже зарегистрирован — просто привязать к лиге
+        if player.league_id == league.id:
+            await message.answer(
+                f"✅ Ты уже в лиге <b>{league.name}</b>!",
+                reply_markup=main_menu_kb()
+            )
+        else:
+            player.league_id = league.id
+            await session.commit()
+            await message.answer(
+                f"🎉 Ты вступил в лигу <b>{league.name}</b>!\n\n"
+                f"📍 {league.city or ''}\n\n"
+                "Теперь ты видишь игры и статистику своей лиги.",
+                reply_markup=main_menu_kb()
+            )
+    else:
+        # Не зарегистрирован — сохранить код и попросить зарегистрироваться
+        await state.update_data(pending_invite_code=invite_code)
+        await message.answer(
+            f"👋 Тебя приглашают в лигу <b>{league.name}</b>!\n\n"
+            "Чтобы присоединиться, сначала нужно создать профиль игрока.\n\n"
+            "Нажми /register и после регистрации ты автоматически попадёшь в эту лигу."
+        )
 
 
 async def _send_reglament(target):

@@ -3,9 +3,10 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import Player, Position
+from app.database.models import Player, Position, League
 from app.keyboards.registration import position_kb, self_rating_kb
 from app.keyboards.main_menu import main_menu_kb
 
@@ -108,6 +109,29 @@ async def reg_photo_wrong(message: Message):
 async def _finish_registration(message: Message, state: FSMContext,
                                 session: AsyncSession, photo_file_id: str | None):
     data = await state.get_data()
+    pending_invite_code = data.get("pending_invite_code")
+
+    # Определить лигу по инвайт-коду (если пришёл по ссылке)
+    league_id = None
+    if pending_invite_code:
+        league_res = await session.execute(
+            select(League).where(
+                League.invite_code == pending_invite_code,
+                League.is_active == True,
+            )
+        )
+        league = league_res.scalar_one_or_none()
+        if league:
+            league_id = league.id
+
+    # Если инвайт-кода нет, привязать к дефолтной лиге (первая по id)
+    if league_id is None:
+        default_res = await session.execute(
+            select(League).order_by(League.id).limit(1)
+        )
+        default_league = default_res.scalar_one_or_none()
+        if default_league:
+            league_id = default_league.id
 
     new_player = Player(
         telegram_id=message.from_user.id,
@@ -118,6 +142,7 @@ async def _finish_registration(message: Message, state: FSMContext,
         rating=round(data["self_rating"] * 0.85, 1),
         rating_provisional=True,
         photo_file_id=photo_file_id,
+        league_id=league_id,
     )
     session.add(new_player)
     await session.commit()

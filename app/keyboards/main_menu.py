@@ -42,6 +42,10 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📅 Создать игровой день", callback_data="admin_create_gameday"),
     )
     builder.row(
+        InlineKeyboardButton(text="📋 Активные игры", callback_data="admin_active_games"),
+        InlineKeyboardButton(text="📁 Прошедшие игры", callback_data="admin_past_games"),
+    )
+    builder.row(
         InlineKeyboardButton(text="👥 Управление игроками", callback_data="admin_players"),
         InlineKeyboardButton(text="💳 Оплата", callback_data="admin_payments"),
     )
@@ -50,7 +54,8 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"),
     )
     builder.row(
-        InlineKeyboardButton(text="📤 Экспорт в Google Sheets", callback_data="admin_export_sheets"),
+        InlineKeyboardButton(text="🌐 Моя лига", callback_data="admin_league_info"),
+        InlineKeyboardButton(text="📤 Экспорт в Sheets", callback_data="admin_export_sheets"),
     )
     builder.row(
         InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"),

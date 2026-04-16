@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # Пример: https://football-bot-production.railway.app
     WEBAPP_URL: str = ""
 
+    # Telegram username бота (без @) — нужен для генерации инвайт-ссылок
+    BOT_USERNAME: str = "football_manager_2026_bot"
+
     # Google Sheets — JSON-строка сервисного аккаунта и ID таблицы
     GOOGLE_CREDENTIALS_JSON: str = ""
     GOOGLE_SHEET_ID: str = ""

@@ -1,3 +1,5 @@
+import random
+import string
 from datetime import datetime
 from enum import Enum as PyEnum
 from typing import Optional
@@ -35,7 +37,7 @@ class PlayerStatus(str, PyEnum):
 
 class GameDayStatus(str, PyEnum):
     ANNOUNCED = "announced"   # создан, идёт запись
-    CLOSED = "closed"         # запись закрыта, команды ещё не сформированы
+    CLOSED = "closed"         # запись закрыта
     IN_PROGRESS = "in_progress"
     FINISHED = "finished"
     CANCELLED = "cancelled"
@@ -45,7 +47,7 @@ class AttendanceResponse(str, PyEnum):
     NO = "no"
     MAYBE = "maybe"
     NO_RESPONSE = "no_response"
-    WAITLIST = "waitlist"   # лист ожидания (мест нет)
+    WAITLIST = "waitlist"   # лист ожидания
 
 class MatchStatus(str, PyEnum):
     SCHEDULED = "scheduled"
@@ -53,8 +55,8 @@ class MatchStatus(str, PyEnum):
     FINISHED = "finished"
 
 class MatchFormat(str, PyEnum):
-    TIME = "time"      # по времени
-    GOALS = "goals"    # до N голов
+    TIME = "time"
+    GOALS = "goals"
 
 class GoalType(str, PyEnum):
     GOAL = "goal"
@@ -65,7 +67,28 @@ class CardType(str, PyEnum):
     RED = "red"
 
 
+def _gen_invite_code() -> str:
+    """Генерирует случайный 8-символьный инвайт-код (A-Z0-9)."""
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
+
+
 # ---------- Models ----------
+
+class League(Base):
+    """Лига — изолированная группа игроков со своим расписанием."""
+    __tablename__ = "leagues"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    invite_code: Mapped[str] = mapped_column(String(10), unique=True, index=True)
+    admin_telegram_id: Mapped[int] = mapped_column(BigInteger)
+    city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    players: Mapped[list["Player"]] = relationship(back_populates="league")
+    game_days: Mapped[list["GameDay"]] = relationship(back_populates="league")
+
 
 class Player(Base):
     __tablename__ = "players"
@@ -75,18 +98,20 @@ class Player(Base):
     username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     name: Mapped[str] = mapped_column(String(100))
     position: Mapped[Position] = mapped_column(Enum(Position, name="player_pos_type"), name="player_position")
-    self_rating: Mapped[int] = mapped_column(Integer, default=5)  # самооценка 1-10
-    rating: Mapped[float] = mapped_column(Float, default=5.0)     # итоговый рейтинг
+    self_rating: Mapped[int] = mapped_column(Integer, default=5)
+    rating: Mapped[float] = mapped_column(Float, default=5.0)
     rating_provisional: Mapped[bool] = mapped_column(Boolean, default=True)
     reliability_pct: Mapped[float] = mapped_column(Float, default=100.0)
-    balance: Mapped[int] = mapped_column(Integer, default=0)      # в рублях
+    balance: Mapped[int] = mapped_column(Integer, default=0)
     games_played: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[PlayerStatus] = mapped_column(Enum(PlayerStatus), default=PlayerStatus.ACTIVE)
     is_referee: Mapped[bool] = mapped_column(Boolean, default=False)
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    league_id: Mapped[Optional[int]] = mapped_column(ForeignKey("leagues.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     # Relationships
+    league: Mapped[Optional["League"]] = relationship(back_populates="players")
     attendances: Mapped[list["Attendance"]] = relationship(back_populates="player")
     goals: Mapped[list["Goal"]] = relationship(back_populates="player")
     payments: Mapped[list["Payment"]] = relationship(back_populates="player")
@@ -96,6 +121,8 @@ class GameDay(Base):
     __tablename__ = "game_days"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    league_id: Mapped[Optional[int]] = mapped_column(ForeignKey("leagues.id"), nullable=True)
+    tournament_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     scheduled_at: Mapped[datetime] = mapped_column(DateTime)
     location: Mapped[str] = mapped_column(String(200))
     player_limit: Mapped[int] = mapped_column(Integer, default=20)
@@ -109,6 +136,7 @@ class GameDay(Base):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Relationships
+    league: Mapped[Optional["League"]] = relationship(back_populates="game_days")
     attendances: Mapped[list["Attendance"]] = relationship(back_populates="game_day")
     teams: Mapped[list["Team"]] = relationship(back_populates="game_day")
     matches: Mapped[list["Match"]] = relationship(back_populates="game_day")
@@ -124,13 +152,18 @@ class GameDay(Base):
 
     @property
     def is_open(self) -> bool:
-        from datetime import timezone
         now = datetime.now()
         if self.status != GameDayStatus.ANNOUNCED:
             return False
         if self.registration_deadline and now > self.registration_deadline:
             return False
-        return self.spots_left > 0
+        return True  # Запись открыта; waitlist включается автоматически при достижении лимита
+
+    @property
+    def display_name(self) -> str:
+        if self.tournament_number:
+            return f"Турнир #{self.tournament_number}"
+        return self.scheduled_at.strftime("%d.%m.%Y")
 
 
 class Attendance(Base):
@@ -146,7 +179,6 @@ class Attendance(Base):
     actually_came: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     responded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
-    # Relationships
     game_day: Mapped["GameDay"] = relationship(back_populates="attendances")
     player: Mapped["Player"] = relationship(back_populates="attendances")
 
@@ -160,7 +192,6 @@ class Team(Base):
     color_emoji: Mapped[str] = mapped_column(String(10), default="⚪")
     captain_id: Mapped[Optional[int]] = mapped_column(ForeignKey("players.id"), nullable=True)
 
-    # Relationships
     game_day: Mapped["GameDay"] = relationship(back_populates="teams")
     captain: Mapped[Optional["Player"]] = relationship(foreign_keys=[captain_id])
     players: Mapped[list["TeamPlayer"]] = relationship(back_populates="team")
@@ -232,7 +263,7 @@ class RatingRound(Base):
     __tablename__ = "rating_rounds"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    triggered_by: Mapped[str] = mapped_column(String(50))  # admin / auto / new_player
+    triggered_by: Mapped[str] = mapped_column(String(50))
     started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     deadline_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -248,7 +279,7 @@ class RatingVote(Base):
     round_id: Mapped[int] = mapped_column(ForeignKey("rating_rounds.id"))
     voter_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
     nominee_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
-    score: Mapped[int] = mapped_column(Integer)        # 1-10
+    score: Mapped[int] = mapped_column(Integer)
     is_anomaly: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

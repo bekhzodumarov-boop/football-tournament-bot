@@ -4,13 +4,13 @@ from app.database.models import GameDay
 
 
 def join_game_kb(game_day_id: int, is_open: bool) -> InlineKeyboardMarkup:
-    """Кнопки анонса игры — Записаться ведёт к экрану подтверждения с Регламентом."""
+    """Кнопки анонса игры."""
     builder = InlineKeyboardBuilder()
     if is_open:
         builder.row(
             InlineKeyboardButton(
                 text="✅ Записаться",
-                callback_data=f"join_pre:{game_day_id}"   # → экран согласия с регламентом
+                callback_data=f"join_pre:{game_day_id}"
             ),
             InlineKeyboardButton(text="❌ Не пойду", callback_data=f"decline:{game_day_id}"),
         )
@@ -38,6 +38,7 @@ def join_confirm_kb(game_day_id: int) -> InlineKeyboardMarkup:
 
 
 def confirm_attendance_kb(game_day_id: int) -> InlineKeyboardMarkup:
+    """Кнопки финального подтверждения за 2 часа до игры."""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="✅ Да, иду!", callback_data=f"confirm_yes:{game_day_id}"),
@@ -50,7 +51,7 @@ def confirm_attendance_kb(game_day_id: int) -> InlineKeyboardMarkup:
 
 
 def game_day_action_kb(game_day_id: int) -> InlineKeyboardMarkup:
-    """Кнопки управления игровым днём для Админа"""
+    """Кнопки управления игровым днём для Админа."""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="👥 Список игроков", callback_data=f"gd_players:{game_day_id}"),
@@ -58,11 +59,14 @@ def game_day_action_kb(game_day_id: int) -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="📢 Разослать анонс", callback_data=f"gd_announce:{game_day_id}"),
-        InlineKeyboardButton(text="🔒 Закрыть запись", callback_data=f"gd_close:{game_day_id}"),
+        InlineKeyboardButton(text="💸 Финансовый итог", callback_data=f"gd_finance:{game_day_id}"),
     )
     builder.row(
         InlineKeyboardButton(text="❌ Отменить игру", callback_data=f"gd_cancel:{game_day_id}"),
         InlineKeyboardButton(text="🗑 Удалить игру", callback_data=f"gd_delete:{game_day_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back"),
     )
     return builder.as_markup()
 
