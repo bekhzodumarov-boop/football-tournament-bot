@@ -36,9 +36,17 @@ AsyncSessionFactory = async_sessionmaker(
 
 
 async def create_db_and_tables():
+    # CREATE TABLE / ALTER TABLE — внутри транзакции (обычный режим)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _run_migrations(conn)
+
+    # ALTER TYPE ... ADD VALUE нельзя запускать внутри транзакции в PostgreSQL
+    # Запускаем отдельно в режиме AUTOCOMMIT
+    if not db_url.startswith("sqlite"):
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await _run_enum_migrations(conn)
 
 
 async def _run_migrations(conn):
@@ -84,10 +92,16 @@ async def _run_migrations(conn):
         await conn.execute(text(
             "ALTER TABLE matches ADD COLUMN IF NOT EXISTS goals_to_win INTEGER NOT NULL DEFAULT 3"
         ))
-        # Добавить новое значение в PostgreSQL enum (WAITLIST)
-        await conn.execute(text(
-            "ALTER TYPE attendanceresponse ADD VALUE IF NOT EXISTS 'waitlist'"
-        ))
+
+
+async def _run_enum_migrations(conn) -> None:
+    """
+    ALTER TYPE ... ADD VALUE нельзя запускать внутри транзакции в PostgreSQL.
+    Эта функция вызывается отдельно в режиме AUTOCOMMIT.
+    """
+    await conn.execute(text(
+        "ALTER TYPE attendanceresponse ADD VALUE IF NOT EXISTS 'waitlist'"
+    ))
 
 
 async def get_session() -> AsyncSession:
