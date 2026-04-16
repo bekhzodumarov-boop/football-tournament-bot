@@ -54,14 +54,26 @@ def game_day_action_kb(game_day_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="👥 Список игроков", callback_data=f"gd_players:{game_day_id}"),
-        InlineKeyboardButton(text="🔀 Сформировать команды", callback_data=f"gd_teams:{game_day_id}"),
-    )
-    builder.row(
         InlineKeyboardButton(text="💰 Отметить оплату", callback_data=f"gd_payment:{game_day_id}"),
-        InlineKeyboardButton(text="📢 Разослать анонс", callback_data=f"gd_announce:{game_day_id}"),
     )
     builder.row(
+        InlineKeyboardButton(text="📢 Разослать анонс", callback_data=f"gd_announce:{game_day_id}"),
         InlineKeyboardButton(text="🔒 Закрыть запись", callback_data=f"gd_close:{game_day_id}"),
+    )
+    builder.row(
         InlineKeyboardButton(text="❌ Отменить игру", callback_data=f"gd_cancel:{game_day_id}"),
+        InlineKeyboardButton(text="🗑 Удалить игру", callback_data=f"gd_delete:{game_day_id}"),
+    )
+    return builder.as_markup()
+
+
+def delete_confirm_kb(game_day_id: int) -> InlineKeyboardMarkup:
+    """Подтверждение удаления игрового дня."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🗑 Да, удалить навсегда", callback_data=f"gd_delete_ok:{game_day_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="↩️ Отмена", callback_data=f"gd_players:{game_day_id}"),
     )
     return builder.as_markup()
