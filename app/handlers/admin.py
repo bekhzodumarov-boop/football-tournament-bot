@@ -44,8 +44,11 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
     await call.answer()
 
     game_day_id = int(call.data.split(":")[1])
+
+    game_day = await session.get(GameDay, game_day_id)
     result = await session.execute(
         select(Attendance)
+        .options(selectinload(Attendance.player))
         .where(
             Attendance.game_day_id == game_day_id,
             Attendance.response == AttendanceResponse.YES
@@ -53,21 +56,21 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
     )
     attendances = result.scalars().all()
 
+    gd_name = game_day.display_name if game_day else f"#{game_day_id}"
+
     if not attendances:
         await call.message.edit_text(
-            "📭 Никто ещё не записался.",
+            f"📋 <b>{gd_name}</b>\n\n📭 Никто ещё не записался.",
             reply_markup=game_day_action_kb(game_day_id)
         )
         return
 
-    lines = [f"👥 <b>Записались ({len(attendances)}):</b>\n"]
+    from app.database.models import POSITION_LABELS
+    lines = [f"📋 <b>{gd_name}</b>\n👥 Записались ({len(attendances)}):\n"]
     for i, att in enumerate(attendances, 1):
-        player = att.player
-        from app.database.models import POSITION_LABELS
-        pos = POSITION_LABELS.get(player.position, player.position)
-        lines.append(
-            f"{i}. <b>{player.name}</b> — {pos}, ⭐{player.rating:.1f}"
-        )
+        p = att.player
+        pos = POSITION_LABELS.get(p.position, p.position)
+        lines.append(f"{i}. <b>{p.name}</b> — {pos}, ⭐{p.rating:.1f}")
 
     await call.message.edit_text(
         "\n".join(lines),
