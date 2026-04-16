@@ -12,7 +12,18 @@ from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
     Player, Payment, Team, TeamPlayer, Match, Goal, Card,
 )
-from app.keyboards.game_day import game_day_action_kb, join_game_kb, delete_confirm_kb
+from app.keyboards.game_day import game_day_action_kb, join_game_kb
+try:
+    from app.keyboards.game_day import delete_confirm_kb
+except ImportError:
+    # Fallback если старая версия keyboards/game_day.py без delete_confirm_kb
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as _IKB
+    from aiogram.types import InlineKeyboardButton as _IKBt
+    def delete_confirm_kb(game_day_id: int):
+        b = _IKB()
+        b.row(_IKBt(text="🗑 Да, удалить навсегда", callback_data=f"gd_delete_ok:{game_day_id}"))
+        b.row(_IKBt(text="↩️ Отмена", callback_data=f"gd_players:{game_day_id}"))
+        return b.as_markup()
 
 router = Router()
 
