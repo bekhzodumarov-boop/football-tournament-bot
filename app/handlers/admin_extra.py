@@ -1304,8 +1304,7 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
         game_day = await session.get(GameDay, game_day_id)
         gd_name = game_day.display_name if game_day else f"#{game_day_id}"
 
-        lines = [f"⚽ <b>Состав команд ({gd_name})</b>\n",
-                 "<i>Разбивка на команды уже проведена.</i>"]
+        lines = [f"⚽ <b>Состав команд ({gd_name})</b>\n"]
 
         for team in existing_teams:
             tp_res = await session.execute(
@@ -1323,9 +1322,17 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
             else:
                 lines.append("  <i>нет игроков</i>")
 
+        # Кнопка пересоздания + назад
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(
+            text="🔄 Пересоздать команды",
+            callback_data=f"auto_teams_reset:{game_day_id}"
+        ))
+        kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
+
         await call.message.edit_text(
             "\n".join(lines),
-            reply_markup=game_day_action_kb(game_day_id)
+            reply_markup=kb.as_markup()
         )
         return
 
@@ -1357,7 +1364,122 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
     )
 
 
+@router.callback_query(F.data.startswith("auto_teams_reset:"))
+async def auto_teams_reset(call: CallbackQuery, session: AsyncSession):
+    """Удалить существующие команды и начать заново."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    from app.database.models import Team as TeamModel, TeamPlayer as TeamPlayerModel
+    from sqlalchemy import delete as _del
+
+    game_day_id = int(call.data.split(":")[1])
+
+    old_res = await session.execute(
+        select(TeamModel).where(TeamModel.game_day_id == game_day_id)
+    )
+    old_teams = old_res.scalars().all()
+    if old_teams:
+        old_ids = [t.id for t in old_teams]
+        matches_res = await session.execute(
+            select(Match).where(
+                (Match.team_home_id.in_(old_ids)) | (Match.team_away_id.in_(old_ids))
+            )
+        )
+        mid = [m.id for m in matches_res.scalars().all()]
+        if mid:
+            await session.execute(_del(Goal).where(Goal.match_id.in_(mid)))
+            await session.execute(_del(Card).where(Card.match_id.in_(mid)))
+            await session.execute(_del(Match).where(Match.id.in_(mid)))
+        await session.execute(_del(TeamPlayerModel).where(TeamPlayerModel.team_id.in_(old_ids)))
+        await session.execute(_del(TeamModel).where(TeamModel.id.in_(old_ids)))
+        await session.commit()
+
+    # Перейти к выбору количества команд
+    result = await session.execute(
+        select(Attendance).where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES
+        )
+    )
+    player_count = len(result.scalars().all())
+
+    builder = InlineKeyboardBuilder()
+    for n in [2, 3, 4]:
+        builder.button(text=f"{n} команды", callback_data=f"auto_teams_count:{game_day_id}:{n}")
+    builder.adjust(3)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
+
+    await call.message.edit_text(
+        f"⚽ <b>Создание команд</b>\n\n"
+        f"Зарегистрировано: <b>{player_count}</b> игроков\n\n"
+        f"Сколько команд создать?",
+        reply_markup=builder.as_markup()
+    )
+
+
 @router.callback_query(F.data.startswith("auto_teams_count:"))
+async def auto_teams_ask_size(call: CallbackQuery, session: AsyncSession):
+    """Шаг 2: спросить сколько человек в команде."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    parts = call.data.split(":")
+    game_day_id = int(parts[1])
+    num_teams = int(parts[2])
+
+    result = await session.execute(
+        select(Attendance).where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES
+        )
+    )
+    player_count = len(result.scalars().all())
+
+    if player_count < num_teams:
+        await call.answer(
+            f"❌ Недостаточно игроков: {player_count} записано, нужно минимум {num_teams}.",
+            show_alert=True
+        )
+        return
+
+    # Предлагаем варианты размера команды
+    natural = player_count // num_teams  # натуральное деление
+    options = sorted({max(natural - 1, 1), natural, natural + 1})
+
+    builder = InlineKeyboardBuilder()
+    for size in options:
+        total_used = size * num_teams
+        if total_used > player_count:
+            label = f"{size} чел. (не хватит игроков)"
+        elif total_used < player_count:
+            leftover = player_count - total_used
+            label = f"{size} чел. ({leftover} в запасе)"
+        else:
+            label = f"{size} чел. (ровно)"
+        builder.button(
+            text=label,
+            callback_data=f"auto_teams_size:{game_day_id}:{num_teams}:{size}"
+        )
+    builder.adjust(1)
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data=f"gd_auto_teams:{game_day_id}"
+    ))
+
+    await call.message.edit_text(
+        f"⚽ <b>Создание команд</b>\n\n"
+        f"Игроков: <b>{player_count}</b> | Команд: <b>{num_teams}</b>\n\n"
+        f"Сколько человек в каждой команде?",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("auto_teams_size:"))
 async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bot):
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
@@ -1367,12 +1489,12 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
         Team as TeamModel, TeamPlayer as TeamPlayerModel, Position
     )
     from app.database.models import POSITION_LABELS
-    from sqlalchemy import delete as sql_delete
     from app.keyboards.game_day import game_day_action_kb
 
     parts = call.data.split(":")
     game_day_id = int(parts[1])
     num_teams = int(parts[2])
+    players_per_team = int(parts[3])
 
     # Загрузить зарегистрированных игроков
     result = await session.execute(
@@ -1386,40 +1508,66 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
     attendances = result.scalars().all()
     players: list[Player] = [att.player for att in attendances if att.player is not None]
 
-    if len(players) < num_teams:
+    total_spots = players_per_team * num_teams
+    if len(players) < total_spots:
         await call.answer(
-            f"❌ Недостаточно игроков: {len(players)} записано, нужно минимум {num_teams}.",
+            f"❌ Нужно {total_spots} игроков, а записано {len(players)}.",
             show_alert=True
         )
         return
 
+    # Если игроков больше чем мест — берём лучших по рейтингу
+    if len(players) > total_spots:
+        players = sorted(players, key=lambda p: p.rating, reverse=True)[:total_spots]
+
     await call.answer("⏳ Формирую команды...")
 
-    # ── Алгоритм балансировки по позициям + рейтингу ───────────────────
-    # Принцип: snake draft отдельно для каждой позиции.
-    # Это гарантирует: одинаковые позиции распределяются равномерно,
-    # а внутри каждой позиции рейтинг выравнивается змейкой.
+    # ── Алгоритм равного распределения ────────────────────────────────
+    # 1. Сначала назначаем вратарей (макс 1 на команду)
+    # 2. Остальных распределяем round-robin snake по рейтингу,
+    #    соблюдая лимит players_per_team на команду
 
-    def snake_draft(group: list, buckets: list[list]) -> None:
-        """Распределяет group по buckets змейкой (0,1,...,n-1,n-1,...,0,...)"""
-        n = len(buckets)
-        if n == 0:
-            return
-        direction = 1
-        idx = 0
-        for player in group:
-            buckets[idx].append(player)
-            next_idx = idx + direction
-            if next_idx >= n:
-                direction = -1
-                idx = n - 1
-            elif next_idx < 0:
-                direction = 1
-                idx = 0
-            else:
-                idx = next_idx
+    gks = sorted([p for p in players if p.position == Position.GK],
+                 key=lambda p: p.rating, reverse=True)
+    rest = sorted([p for p in players if p.position != Position.GK],
+                  key=lambda p: p.rating, reverse=True)
 
-    # Создать команды
+    team_players_buckets: list[list[Player]] = [[] for _ in range(num_teams)]
+    gk_warnings: list[str] = []
+
+    # Назначить вратарей: по одному на команду, лишние → в rest
+    for i, gk in enumerate(gks):
+        if i < num_teams:
+            team_players_buckets[i].append(gk)
+        else:
+            rest.append(gk)
+    rest.sort(key=lambda p: p.rating, reverse=True)
+
+    if len(gks) < num_teams:
+        missing = num_teams - len(gks)
+        gk_warnings.append(
+            f"⚠️ Вратарей {len(gks)} на {num_teams} команды — "
+            f"{missing} {'команда' if missing == 1 else 'команды' if missing < 5 else 'команд'} без вратаря!"
+        )
+
+    # Round-robin snake по оставшимся слотам
+    # Строим порядок выбора: тур 1: 0,1,2,...,n-1; тур 2: n-1,...,1,0; и т.д.
+    pick_order = []
+    for round_i in range(players_per_team):
+        if round_i % 2 == 0:
+            pick_order.extend(range(num_teams))
+        else:
+            pick_order.extend(range(num_teams - 1, -1, -1))
+
+    rest_idx = 0
+    for team_idx in pick_order:
+        if rest_idx >= len(rest):
+            break
+        if len(team_players_buckets[team_idx]) < players_per_team:
+            team_players_buckets[team_idx].append(rest[rest_idx])
+            rest_idx += 1
+
+    # Создать команды в БД
     teams: list[TeamModel] = []
     for i in range(num_teams):
         team = TeamModel(
@@ -1429,24 +1577,7 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
         )
         session.add(team)
         teams.append(team)
-    await session.flush()  # нужен id команд
-
-    team_players_buckets: list[list[Player]] = [[] for _ in range(num_teams)]
-    gk_warnings: list[str] = []
-
-    # Распределяем каждую позицию отдельно, сортируя по рейтингу (убывание)
-    for pos in [Position.GK, Position.DEF, Position.MID, Position.FWD]:
-        group = sorted(
-            [p for p in players if p.position == pos],
-            key=lambda p: p.rating, reverse=True
-        )
-        if pos == Position.GK and len(group) < num_teams:
-            missing = num_teams - len(group)
-            gk_warnings.append(
-                f"⚠️ Вратарей {len(group)} на {num_teams} команды — "
-                f"{missing} команд{'а' if missing == 1 else 'ы' if missing < 5 else ''} без вратаря!"
-            )
-        snake_draft(group, team_players_buckets)
+    await session.flush()
 
     # Сохранить TeamPlayer
     for i, team in enumerate(teams):
