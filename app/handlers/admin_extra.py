@@ -1256,48 +1256,59 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
 
     game_day_id = int(call.data.split(":")[1])
 
-    # Проверяем, что есть зарегистрированные игроки
+    from app.database.models import Team as TeamModel, TeamPlayer as TeamPlayerModel
+    from app.database.models import POSITION_LABELS
+    from app.keyboards.game_day import game_day_action_kb
+
+    # Если команды уже созданы — показываем их, жеребьёвка не повторяется
+    existing_res = await session.execute(
+        select(TeamModel)
+        .options(selectinload(TeamModel.players).selectinload(TeamPlayerModel.player))
+        .where(TeamModel.game_day_id == game_day_id)
+    )
+    existing_teams = existing_res.scalars().all()
+
+    if existing_teams:
+        game_day = await session.get(GameDay, game_day_id)
+        gd_name = game_day.display_name if game_day else f"#{game_day_id}"
+        lines = [f"🎲 <b>Команды ({gd_name})</b>\n",
+                 "<i>Жеребьёвка уже была проведена.</i>"]
+        for team in existing_teams:
+            lines.append(f"\n{team.color_emoji} <b>Команда {team.name}</b>:")
+            for tp in team.players:
+                if tp.player:
+                    pos = POSITION_LABELS.get(tp.player.position, tp.player.position)
+                    lines.append(f"  • {tp.player.name} — {pos}")
+        await call.message.edit_text(
+            "\n".join(lines),
+            reply_markup=game_day_action_kb(game_day_id)
+        )
+        return
+
+    # Команд ещё нет — предлагаем выбрать количество
     result = await session.execute(
         select(Attendance)
-        .options(selectinload(Attendance.player))
         .where(
             Attendance.game_day_id == game_day_id,
             Attendance.response == AttendanceResponse.YES
         )
     )
-    attendances = result.scalars().all()
+    player_count = len(result.scalars().all())
 
-    if len(attendances) < 2:
-        await call.answer("❌ Нужно минимум 2 игрока для создания команд.", show_alert=True)
+    if player_count < 2:
+        await call.answer("❌ Нужно минимум 2 игрока для жеребьёвки.", show_alert=True)
         return
-
-    from app.database.models import Team as TeamModel, TeamPlayer as TeamPlayerModel
-    from sqlalchemy import delete as sql_delete
-
-    # Если уже есть команды — предупредить и предложить пересоздать
-    existing = await session.execute(
-        select(TeamModel).where(TeamModel.game_day_id == game_day_id)
-    )
-    has_teams = existing.scalars().first() is not None
 
     builder = InlineKeyboardBuilder()
     for n in [2, 3, 4]:
-        builder.button(
-            text=f"{n} команды",
-            callback_data=f"auto_teams_count:{game_day_id}:{n}"
-        )
+        builder.button(text=f"{n} команды", callback_data=f"auto_teams_count:{game_day_id}:{n}")
     builder.adjust(3)
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
 
-    players_count = len(attendances)
-    warn = ""
-    if has_teams:
-        warn = "\n\n⚠️ <b>Внимание:</b> старые команды будут удалены и пересозданы."
-
     await call.message.edit_text(
-        f"🎲 <b>Создание команд</b>\n\n"
-        f"Игроков: <b>{players_count}</b>\n"
-        f"Выбери количество команд:{warn}",
+        f"🎲 <b>Жеребьёвка команд</b>\n\n"
+        f"Зарегистрировано: <b>{player_count}</b> игроков\n\n"
+        f"Сколько команд создать?",
         reply_markup=builder.as_markup()
     )
 
@@ -1338,44 +1349,7 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
         )
         return
 
-    await call.answer("⏳ Создаю команды...")
-
-    # ── Удалить старые команды (если были) ────────────────────────────
-    old_teams_result = await session.execute(
-        select(TeamModel).where(TeamModel.game_day_id == game_day_id)
-    )
-    old_teams = old_teams_result.scalars().all()
-    if old_teams:
-        old_team_ids = [t.id for t in old_teams]
-
-        # Найти матчи этих команд
-        old_matches_result = await session.execute(
-            select(Match).where(
-                (Match.team_home_id.in_(old_team_ids)) |
-                (Match.team_away_id.in_(old_team_ids))
-            )
-        )
-        old_matches = old_matches_result.scalars().all()
-        old_match_ids = [m.id for m in old_matches]
-
-        # Удалить: голы → карточки → матчи → состав → команды
-        if old_match_ids:
-            await session.execute(
-                sql_delete(Goal).where(Goal.match_id.in_(old_match_ids))
-            )
-            await session.execute(
-                sql_delete(Card).where(Card.match_id.in_(old_match_ids))
-            )
-            await session.execute(
-                sql_delete(Match).where(Match.id.in_(old_match_ids))
-            )
-        await session.execute(
-            sql_delete(TeamPlayerModel).where(TeamPlayerModel.team_id.in_(old_team_ids))
-        )
-        await session.execute(
-            sql_delete(TeamModel).where(TeamModel.id.in_(old_team_ids))
-        )
-        await session.flush()
+    await call.answer("⏳ Провожу жеребьёвку...")
 
     # ── Алгоритм балансировки ──────────────────────────────────────────
     goalkeepers = sorted(
