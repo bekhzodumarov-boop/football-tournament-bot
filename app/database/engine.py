@@ -111,6 +111,9 @@ async def _run_migrations(conn):
         await conn.execute(text(
             "ALTER TABLE game_days ADD COLUMN IF NOT EXISTS tournament_number INTEGER"
         ))
+        await conn.execute(text(
+            "ALTER TABLE players ADD COLUMN IF NOT EXISTS phone VARCHAR(30)"
+        ))
 
 
 async def _run_enum_migrations(conn) -> None:

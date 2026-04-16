@@ -4,7 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select
+from sqlalchemy import select, delete as sql_delete
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,7 +12,7 @@ from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
     Player, Payment, Team, TeamPlayer, Match, Goal, Card,
-    League,
+    League, RatingVote,
 )
 from app.keyboards.game_day import game_day_action_kb, join_game_kb, delete_confirm_kb
 
@@ -388,6 +388,9 @@ def _player_card_kb(player: Player) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🚫 Заблокировать" if player.status.value == "active" else "✅ Разблокировать",
                              callback_data=f"adm_toggle_ban:{player.id}"),
     )
+    builder.row(
+        InlineKeyboardButton(text="🗑 Удалить профиль", callback_data=f"adm_delete_player:{player.id}"),
+    )
     builder.row(InlineKeyboardButton(text="🔙 К списку", callback_data="admin_players"))
     return builder.as_markup()
 
@@ -517,6 +520,74 @@ async def adm_toggle_ban(call: CallbackQuery, session: AsyncSession, bot: Bot):
         pass
 
     await adm_player_card(call, session)
+
+
+@router.callback_query(F.data.startswith("adm_delete_player:"))
+async def adm_delete_player_confirm(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    player_id = int(call.data.split(":")[1])
+    player = await session.get(Player, player_id)
+    if not player:
+        await call.message.edit_text("❌ Игрок не найден.")
+        return
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🗑 Да, удалить навсегда",
+            callback_data=f"adm_delete_player_ok:{player_id}"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(text="↩️ Отмена", callback_data=f"adm_player:{player_id}")
+    )
+
+    await call.message.edit_text(
+        f"⚠️ <b>Удалить профиль?</b>\n\n"
+        f"👤 <b>{player.name}</b>\n"
+        f"@{player.username or '—'}\n\n"
+        "Это действие <b>нельзя отменить</b>. Будут удалены все данные игрока: "
+        "посещения, оплаты, голы, карточки.",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("adm_delete_player_ok:"))
+async def adm_delete_player_execute(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    player_id = int(call.data.split(":")[1])
+    player = await session.get(Player, player_id)
+    if not player:
+        await call.message.edit_text("❌ Игрок уже удалён или не найден.")
+        return
+
+    player_name = player.name
+
+    # Каскадное удаление всех связанных данных
+    await session.execute(sql_delete(RatingVote).where(RatingVote.voter_id == player_id))
+    await session.execute(sql_delete(RatingVote).where(RatingVote.nominee_id == player_id))
+    await session.execute(sql_delete(Goal).where(Goal.player_id == player_id))
+    await session.execute(sql_delete(Card).where(Card.player_id == player_id))
+    await session.execute(sql_delete(TeamPlayer).where(TeamPlayer.player_id == player_id))
+    await session.execute(sql_delete(Payment).where(Payment.player_id == player_id))
+    await session.execute(sql_delete(Attendance).where(Attendance.player_id == player_id))
+    await session.delete(player)
+    await session.commit()
+
+    from app.keyboards.main_menu import admin_menu_kb
+    await call.message.edit_text(
+        f"✅ Профиль <b>{player_name}</b> удалён.\n\n"
+        "Все связанные данные (посещения, оплаты, голы, карточки) также удалены.",
+        reply_markup=admin_menu_kb()
+    )
 
 
 @router.callback_query(F.data == "admin_back")

@@ -107,6 +107,7 @@ class Player(Base):
     status: Mapped[PlayerStatus] = mapped_column(Enum(PlayerStatus), default=PlayerStatus.ACTIVE)
     is_referee: Mapped[bool] = mapped_column(Boolean, default=False)
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     league_id: Mapped[Optional[int]] = mapped_column(ForeignKey("leagues.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

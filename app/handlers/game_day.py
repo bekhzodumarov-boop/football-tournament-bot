@@ -26,6 +26,21 @@ class CreateGameDayFSM(StatesGroup):
     waiting_limit = State()
 
 
+# ── Cancel регистрируется ПЕРВЫМ — перехватывает раньше FSM-хендлеров ──
+
+@router.message(Command("cancel"))
+async def gameday_cancel(message: Message, state: FSMContext):
+    current = await state.get_state()
+    if current is None:
+        return  # передать другим роутерам
+    await state.clear()
+    from app.keyboards.main_menu import admin_menu_kb
+    await message.answer(
+        "❌ Создание игрового дня отменено.",
+        reply_markup=admin_menu_kb()
+    )
+
+
 # ---------- Показать ближайшую игру ----------
 
 @router.callback_query(F.data == "next_game")
@@ -299,12 +314,16 @@ async def admin_create_gameday_start(call: CallbackQuery, state: FSMContext):
         await call.answer("⛔ Нет доступа", show_alert=True)
         return
     await call.answer()
+    from aiogram.types import InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    cancel_kb = InlineKeyboardBuilder()
+    cancel_kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back"))
     await call.message.edit_text(
         "📅 <b>Создание игрового дня</b>\n\n"
         "Введи дату и время игры в формате:\n"
         "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n\n"
-        "Например: <code>28.04.2026 19:00</code>\n\n"
-        "<i>Отмена: /cancel</i>"
+        "Например: <code>28.04.2026 19:00</code>",
+        reply_markup=cancel_kb.as_markup()
     )
     await state.set_state(CreateGameDayFSM.waiting_date)
 
