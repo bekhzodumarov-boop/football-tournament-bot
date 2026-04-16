@@ -1260,28 +1260,38 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
     from app.database.models import POSITION_LABELS
     from app.keyboards.game_day import game_day_action_kb
 
-    # Если жеребьёвка уже была — показываем команды (только если в них есть игроки)
+    # Если команды уже созданы — показываем состав
+    from app.database.models import TeamPlayer as TeamPlayerModel2
     existing_res = await session.execute(
-        select(TeamModel)
-        .options(selectinload(TeamModel.players).selectinload(TeamPlayerModel.player))
-        .where(TeamModel.game_day_id == game_day_id)
+        select(TeamModel).where(TeamModel.game_day_id == game_day_id)
     )
     existing_teams = existing_res.scalars().all()
 
-    # Считаем жеребьёвку проведённой только если хотя бы в одной команде есть игроки
-    has_players = any(len(team.players) > 0 for team in existing_teams)
-
-    if existing_teams and has_players:
+    if existing_teams:
+        # Загружаем игроков отдельным запросом для надёжности
+        from app.database.models import TeamPlayer as TPModel
         game_day = await session.get(GameDay, game_day_id)
         gd_name = game_day.display_name if game_day else f"#{game_day_id}"
-        lines = [f"🎲 <b>Команды ({gd_name})</b>\n",
-                 "<i>Жеребьёвка уже была проведена.</i>"]
+
+        lines = [f"⚽ <b>Состав команд ({gd_name})</b>\n",
+                 "<i>Разбивка на команды уже проведена.</i>"]
+
         for team in existing_teams:
+            tp_res = await session.execute(
+                select(TPModel)
+                .options(selectinload(TPModel.player))
+                .where(TPModel.team_id == team.id)
+            )
+            tps = tp_res.scalars().all()
             lines.append(f"\n{team.color_emoji} <b>Команда {team.name}</b>:")
-            for tp in team.players:
-                if tp.player:
-                    pos = POSITION_LABELS.get(tp.player.position, tp.player.position)
-                    lines.append(f"  • {tp.player.name} — {pos}")
+            if tps:
+                for tp in tps:
+                    if tp.player:
+                        pos = POSITION_LABELS.get(tp.player.position, tp.player.position)
+                        lines.append(f"  • {tp.player.name} — {pos}")
+            else:
+                lines.append("  <i>нет игроков</i>")
+
         await call.message.edit_text(
             "\n".join(lines),
             reply_markup=game_day_action_kb(game_day_id)
@@ -1299,7 +1309,7 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
     player_count = len(result.scalars().all())
 
     if player_count < 2:
-        await call.answer("❌ Нужно минимум 2 игрока для жеребьёвки.", show_alert=True)
+        await call.answer("❌ Нужно минимум 2 игрока для создания команд.", show_alert=True)
         return
 
     builder = InlineKeyboardBuilder()
@@ -1309,7 +1319,7 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
 
     await call.message.edit_text(
-        f"🎲 <b>Жеребьёвка команд</b>\n\n"
+        f"⚽ <b>Создание команд</b>\n\n"
         f"Зарегистрировано: <b>{player_count}</b> игроков\n\n"
         f"Сколько команд создать?",
         reply_markup=builder.as_markup()
@@ -1411,25 +1421,48 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
         for player in team_players_buckets[i]:
             session.add(TeamPlayerModel(team_id=team.id, player_id=player.id))
 
-    await session.commit()
-
-    # ── Рассылка каждому игроку ────────────────────────────────────────
+    # Снять все нужные данные ДО commit — после commit объекты становятся detached
     game_day = await session.get(GameDay, game_day_id)
     gd_name = game_day.display_name if game_day else f"#{game_day_id}"
 
-    sent = 0
+    # Сериализуем команды в plain dict
+    teams_data = []
     for i, team in enumerate(teams):
         bucket = team_players_buckets[i]
-        for player in bucket:
-            other_names = [p.name for p in bucket if p.id != player.id]
+        avg_rating = sum(p.rating for p in bucket) / len(bucket) if bucket else 0.0
+        members = [
+            {
+                "telegram_id": p.telegram_id,
+                "name": p.name,
+                "pos": POSITION_LABELS.get(p.position, p.position),
+                "rating": p.rating,
+            }
+            for p in bucket
+        ]
+        teams_data.append({
+            "name": team.name,
+            "color": team.color_emoji,
+            "avg_rating": avg_rating,
+            "members": members,
+        })
+
+    await session.commit()
+
+    # ── Рассылка каждому игроку ────────────────────────────────────────
+    sent = 0
+    for team_info in teams_data:
+        member_names = [m["name"] for m in team_info["members"]]
+        for member in team_info["members"]:
+            other_names = [n for n in member_names if n != member["name"]]
             teammates_text = ", ".join(other_names) if other_names else "пока никого нет"
             try:
                 await bot.send_message(
-                    player.telegram_id,
+                    member["telegram_id"],
                     f"⚽ <b>Команды на игру {gd_name} сформированы!</b>\n\n"
-                    f"Мы провели рандомную разбивку на команды с балансировкой "
+                    f"Мы провели разбивку на команды с балансировкой "
                     f"по рейтингу и позициям.\n\n"
-                    f"Ты сегодня играешь в команде <b>{team.color_emoji} {team.name}</b>.\n\n"
+                    f"Ты сегодня играешь в команде "
+                    f"<b>{team_info['color']} {team_info['name']}</b>.\n\n"
                     f"С тобой в команде играют: <b>{teammates_text}</b>\n\n"
                     f"Удачи на игре! 🏆"
                 )
@@ -1438,17 +1471,17 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
                 pass
 
     # ── Сводка для Админа ─────────────────────────────────────────────
-    admin_lines = [f"🎲 <b>Команды сформированы!</b> ({gd_name})\n"]
-    for i, team in enumerate(teams):
-        bucket = team_players_buckets[i]
-        avg_rating = sum(p.rating for p in bucket) / len(bucket) if bucket else 0
-        admin_lines.append(f"\n{team.color_emoji} <b>Команда {team.name}</b> (⭐{avg_rating:.1f}):")
-        for player in bucket:
-            pos = POSITION_LABELS.get(player.position, player.position)
-            admin_lines.append(f"  • {player.name} — {pos}")
+    admin_lines = [f"⚽ <b>Команды сформированы!</b> ({gd_name})\n"]
+    for team_info in teams_data:
+        admin_lines.append(
+            f"\n{team_info['color']} <b>Команда {team_info['name']}</b> "
+            f"(⭐{team_info['avg_rating']:.1f}):"
+        )
+        for m in team_info["members"]:
+            admin_lines.append(f"  • {m['name']} — {m['pos']}")
     if gk_warnings:
         admin_lines.append("\n" + "\n".join(gk_warnings))
-    admin_lines.append(f"\n\n📨 Уведомлено игроков: <b>{sent}/{len(players)}</b>")
+    admin_lines.append(f"\n\n📨 Уведомлено: <b>{sent}/{len(players)}</b>")
     full_summary = "\n".join(admin_lines)
 
     # Разослать сводку судьям и другим админам
