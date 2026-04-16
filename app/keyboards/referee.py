@@ -49,6 +49,12 @@ def referee_match_kb(match_id: int, is_started: bool, is_finished: bool) -> Inli
     builder = InlineKeyboardBuilder()
     if is_finished:
         builder.row(InlineKeyboardButton(text="✅ Матч завершён", callback_data="noop"))
+        # Постфактум: добавить события после финального свистка
+        builder.row(
+            InlineKeyboardButton(text="🥅 +Гол", callback_data=f"ref_goal:{match_id}"),
+            InlineKeyboardButton(text="🟡 +ЖК", callback_data=f"ref_yellow:{match_id}"),
+            InlineKeyboardButton(text="🔴 +КК", callback_data=f"ref_red:{match_id}"),
+        )
     elif not is_started:
         builder.row(InlineKeyboardButton(
             text="▶️ Старт таймера",

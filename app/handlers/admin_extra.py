@@ -6,6 +6,8 @@
   - Моя лига
   - /create_league команда
 """
+from urllib.parse import quote
+
 from aiogram import Router, F, Bot
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -19,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
-    Player, Match, League,
+    Player, PlayerStatus, Match, League, RatingRound, RatingVote,
 )
 from app.database.models import _gen_invite_code
 
@@ -35,6 +37,21 @@ class FinancialSummaryFSM(StatesGroup):
 class CreateLeagueFSM(StatesGroup):
     waiting_name = State()
     waiting_city = State()
+
+
+class EditLeagueFSM(StatesGroup):
+    waiting_name = State()
+    waiting_city = State()
+
+
+class RatingVoteFSM(StatesGroup):
+    voting = State()
+
+
+def _invite_share_url(invite_link: str, league_name: str) -> str:
+    """Telegram share URL — открывает выбор контактов/групп."""
+    text = f"Присоединяйся к лиге «{league_name}»! Нажми ссылку чтобы вступить:"
+    return f"https://t.me/share/url?url={quote(invite_link)}&text={quote(text)}"
 
 
 # ══════════════════════════════════════════════════════
@@ -207,9 +224,13 @@ async def adm_past_detail(call: CallbackQuery, session: AsyncSession):
     builder = InlineKeyboardBuilder()
     if game_day.cost_per_player == 0 and game_day.status == GameDayStatus.FINISHED:
         builder.row(InlineKeyboardButton(
-            text="💸 Рассчитать финансовый итог",
+            text="💸 Финансовый итог",
             callback_data=f"gd_finance:{game_day_id}"
         ))
+    builder.row(InlineKeyboardButton(
+        text="🗑 Удалить игру",
+        callback_data=f"gd_delete:{game_day_id}"
+    ))
     builder.row(InlineKeyboardButton(text="🔙 К списку", callback_data="admin_past_games"))
 
     await call.message.edit_text(
@@ -469,9 +490,11 @@ async def adm_league_info(call: CallbackQuery, session: AsyncSession):
     # Получить username бота из settings если есть, иначе дефолт
     bot_username = getattr(cfg, "BOT_USERNAME", "football_manager_2026_bot")
     invite_link = f"https://t.me/{bot_username}?start=join_{league.invite_code}"
+    share_url = _invite_share_url(invite_link, league.name)
 
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="🔗 Поделиться ссылкой", url=invite_link))
+    builder.row(InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url))
+    builder.row(InlineKeyboardButton(text="✏️ Редактировать лигу", callback_data=f"edit_league:{league.id}"))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back"))
 
     await call.message.edit_text(
@@ -481,7 +504,7 @@ async def adm_league_info(call: CallbackQuery, session: AsyncSession):
         f"🔑 Инвайт-код: <code>{league.invite_code}</code>\n"
         f"👥 Активных игроков: {len(players)}\n\n"
         f"🔗 Ссылка для приглашения:\n<code>{invite_link}</code>\n\n"
-        "Поделись этой ссылкой — новые участники автоматически попадут в твою лигу.",
+        "Нажми «Поделиться» — откроется выбор контактов и групп Telegram.",
         reply_markup=builder.as_markup()
     )
 
@@ -489,16 +512,12 @@ async def adm_league_info(call: CallbackQuery, session: AsyncSession):
 @router.callback_query(F.data == "cmd_create_league")
 @router.message(Command("create_league"))
 async def create_league_start(event, state: FSMContext):
+    """Любой зарегистрированный пользователь может создать лигу."""
     is_cb = isinstance(event, CallbackQuery)
     if is_cb:
-        if not settings.is_admin(event.from_user.id):
-            await event.answer("⛔", show_alert=True)
-            return
         await event.answer()
         send = event.message.edit_text
     else:
-        if not settings.is_admin(event.from_user.id):
-            return
         send = event.answer
 
     await state.set_state(CreateLeagueFSM.waiting_name)
@@ -513,8 +532,6 @@ async def create_league_start(event, state: FSMContext):
 
 @router.message(StateFilter(CreateLeagueFSM.waiting_name))
 async def create_league_name(message: Message, state: FSMContext):
-    if not settings.is_admin(message.from_user.id):
-        return
     name = message.text.strip()
     if not name:
         await message.answer("❌ Введи название:")
@@ -538,8 +555,6 @@ async def create_league_skip_city(call: CallbackQuery, state: FSMContext, sessio
 
 @router.message(StateFilter(CreateLeagueFSM.waiting_city))
 async def create_league_city(message: Message, state: FSMContext, session: AsyncSession):
-    if not settings.is_admin(message.from_user.id):
-        return
     city = message.text.strip() or None
     await _finish_create_league(message, state, session, message.from_user.id, city=city)
 
@@ -580,10 +595,10 @@ async def _finish_create_league(msg, state: FSMContext, session: AsyncSession,
 
     bot_username = getattr(settings, "BOT_USERNAME", "football_manager_2026_bot")
     invite_link = f"https://t.me/{bot_username}?start=join_{league.invite_code}"
+    share_url = _invite_share_url(invite_link, league.name)
 
-    from app.keyboards.main_menu import admin_menu_kb
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="🔗 Поделиться ссылкой", url=invite_link))
+    builder.row(InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url))
     builder.row(InlineKeyboardButton(text="🔙 Меню", callback_data="admin_back"))
 
     await msg.answer(
@@ -591,6 +606,461 @@ async def _finish_create_league(msg, state: FSMContext, session: AsyncSession,
         f"🏆 {league.name}\n"
         f"🔑 Инвайт-код: <code>{league.invite_code}</code>\n\n"
         f"🔗 Ссылка для приглашения:\n<code>{invite_link}</code>\n\n"
-        "Поделись этой ссылкой с игроками — они попадут в твою лигу автоматически.",
+        "Нажми «Поделиться» — откроется выбор контактов и групп в Telegram.",
         reply_markup=builder.as_markup()
+    )
+
+
+# ══════════════════════════════════════════════════════
+#  РЕДАКТИРОВАНИЕ ЛИГИ
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("edit_league:"))
+async def edit_league_menu(call: CallbackQuery, session: AsyncSession):
+    await call.answer()
+    league_id = int(call.data.split(":")[1])
+    league = await session.get(League, league_id)
+    if not league:
+        await call.message.edit_text("❌ Лига не найдена.")
+        return
+
+    # Проверить, что это тот же пользователь или суперадмин
+    if league.admin_telegram_id != call.from_user.id and not settings.is_admin(call.from_user.id):
+        await call.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="✏️ Изменить название",
+        callback_data=f"edit_league_name:{league_id}"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="📍 Изменить город/страну",
+        callback_data=f"edit_league_city:{league_id}"
+    ))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_league_info"))
+
+    await call.message.edit_text(
+        f"✏️ <b>Редактировать лигу</b>\n\n"
+        f"🏆 Текущее название: <b>{league.name}</b>\n"
+        f"📍 Город: <b>{league.city or '—'}</b>\n\n"
+        "Что хочешь изменить?",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("edit_league_name:"))
+async def edit_league_name_start(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await call.answer()
+    league_id = int(call.data.split(":")[1])
+    league = await session.get(League, league_id)
+    if not league:
+        return
+    if league.admin_telegram_id != call.from_user.id and not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    await state.set_state(EditLeagueFSM.waiting_name)
+    await state.update_data(edit_league_id=league_id)
+
+    cancel_kb = InlineKeyboardBuilder()
+    cancel_kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"edit_league:{league_id}"))
+    await call.message.edit_text(
+        f"✏️ Введи новое название лиги:\n\n<i>Сейчас: {league.name}</i>",
+        reply_markup=cancel_kb.as_markup()
+    )
+
+
+@router.message(StateFilter(EditLeagueFSM.waiting_name))
+async def edit_league_name_save(message: Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    league_id = data["edit_league_id"]
+    name = message.text.strip()
+    if not name:
+        await message.answer("❌ Название не может быть пустым.")
+        return
+
+    league = await session.get(League, league_id)
+    if league:
+        league.name = name
+        await session.commit()
+
+    await state.clear()
+    from app.keyboards.main_menu import admin_menu_kb
+    await message.answer(
+        f"✅ Название лиги изменено на <b>{name}</b>.",
+        reply_markup=admin_menu_kb()
+    )
+
+
+@router.callback_query(F.data.startswith("edit_league_city:"))
+async def edit_league_city_start(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await call.answer()
+    league_id = int(call.data.split(":")[1])
+    league = await session.get(League, league_id)
+    if not league:
+        return
+    if league.admin_telegram_id != call.from_user.id and not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    await state.set_state(EditLeagueFSM.waiting_city)
+    await state.update_data(edit_league_id=league_id)
+
+    cancel_kb = InlineKeyboardBuilder()
+    cancel_kb.row(InlineKeyboardButton(text="🗑 Убрать город", callback_data=f"edit_league_city_clear:{league_id}"))
+    cancel_kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"edit_league:{league_id}"))
+    await call.message.edit_text(
+        f"📍 Введи город и страну:\n\n<i>Сейчас: {league.city or '—'}</i>\n\n"
+        "<i>Например: Ташкент, Узбекистан</i>",
+        reply_markup=cancel_kb.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("edit_league_city_clear:"))
+async def edit_league_city_clear(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await call.answer()
+    league_id = int(call.data.split(":")[1])
+    await state.clear()
+    league = await session.get(League, league_id)
+    if league:
+        league.city = None
+        await session.commit()
+    from app.keyboards.main_menu import admin_menu_kb
+    await call.message.edit_text("✅ Город удалён.", reply_markup=admin_menu_kb())
+
+
+@router.message(StateFilter(EditLeagueFSM.waiting_city))
+async def edit_league_city_save(message: Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    league_id = data["edit_league_id"]
+    city = message.text.strip() or None
+
+    league = await session.get(League, league_id)
+    if league:
+        league.city = city
+        await session.commit()
+
+    await state.clear()
+    from app.keyboards.main_menu import admin_menu_kb
+    await message.answer(
+        f"✅ Город обновлён: <b>{city or '—'}</b>.",
+        reply_markup=admin_menu_kb()
+    )
+
+
+# ══════════════════════════════════════════════════════
+#  РЕЙТИНГ-ГОЛОСОВАНИЕ
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_rating_round")
+async def adm_rating_round_start(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    from app.keyboards.main_menu import admin_menu_kb
+    from datetime import datetime
+
+    # Получить лигу администратора
+    p_res = await session.execute(
+        select(Player).where(Player.telegram_id == call.from_user.id)
+    )
+    admin_player = p_res.scalar_one_or_none()
+    league_id = admin_player.league_id if admin_player else None
+
+    # Проверить — нет ли уже активного раунда
+    active_res = await session.execute(
+        select(RatingRound).where(RatingRound.status == "active")
+    )
+    existing = active_res.scalar_one_or_none()
+    if existing:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(
+            text="🔒 Закрыть раунд и применить",
+            callback_data=f"rating_round_close:{existing.id}"
+        ))
+        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back"))
+        await call.message.edit_text(
+            f"⭐ <b>Раунд голосования уже активен</b>\n\n"
+            f"Начат: {existing.started_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+            "Дождись голосования от игроков или закрой раунд вручную:",
+            reply_markup=builder.as_markup()
+        )
+        return
+
+    # Создать новый раунд
+    round_ = RatingRound(triggered_by=f"admin:{call.from_user.id}", status="active")
+    session.add(round_)
+    await session.flush()
+
+    # Разослать всем активным игрокам лиги
+    query = select(Player).where(Player.status == PlayerStatus.ACTIVE)
+    if league_id:
+        query = query.where(Player.league_id == league_id)
+    players_res = await session.execute(query)
+    players = players_res.scalars().all()
+
+    await session.commit()
+
+    vote_kb = InlineKeyboardBuilder()
+    vote_kb.row(InlineKeyboardButton(
+        text="⭐ Оценить игроков",
+        callback_data=f"rv_start:{round_.id}"
+    ))
+
+    sent = 0
+    for p in players:
+        try:
+            await bot.send_message(
+                p.telegram_id,
+                f"⭐ <b>Рейтинг-голосование!</b>\n\n"
+                f"Оцени других игроков лиги от 1 до 5 ⭐\n"
+                f"Твои оценки влияют на рейтинг участников.\n\n"
+                "<i>Займёт 1-2 минуты</i>",
+                reply_markup=vote_kb.as_markup()
+            )
+            sent += 1
+        except Exception:
+            pass
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="🔒 Закрыть раунд и применить",
+        callback_data=f"rating_round_close:{round_.id}"
+    ))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back"))
+
+    await call.message.edit_text(
+        f"⭐ <b>Раунд голосования начат!</b>\n\n"
+        f"📨 Уведомлено: {sent} игроков\n\n"
+        "Когда все проголосуют — нажми «Закрыть» для применения результатов.",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("rv_start:"))
+async def rv_start_voting(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    """Игрок начинает голосование."""
+    await call.answer()
+    round_id = int(call.data.split(":")[1])
+
+    # Проверить, что раунд ещё активен
+    round_ = await session.get(RatingRound, round_id)
+    if not round_ or round_.status != "active":
+        await call.message.edit_text("❌ Раунд голосования завершён.")
+        return
+
+    # Получить список других игроков в лиге
+    p_res = await session.execute(
+        select(Player).where(Player.telegram_id == call.from_user.id)
+    )
+    voter = p_res.scalar_one_or_none()
+    if not voter:
+        await call.answer("❌ Ты не зарегистрирован.", show_alert=True)
+        return
+
+    nominees_query = select(Player).where(
+        Player.status == PlayerStatus.ACTIVE,
+        Player.id != voter.id,
+    )
+    if voter.league_id:
+        nominees_query = nominees_query.where(Player.league_id == voter.league_id)
+    nominees_res = await session.execute(nominees_query.order_by(Player.name))
+    nominees = nominees_res.scalars().all()
+
+    if not nominees:
+        await call.message.edit_text("В лиге нет других игроков для оценки.")
+        return
+
+    # Сохранить список в FSM
+    await state.set_state(RatingVoteFSM.voting)
+    await state.update_data(
+        round_id=round_id,
+        nominees=[{"id": p.id, "name": p.name} for p in nominees],
+        current_idx=0,
+        scores={},
+    )
+
+    # Показать первого
+    await _show_vote_nominee(call.message, await state.get_data(), edit=True)
+
+
+async def _show_vote_nominee(msg, data: dict, edit: bool = False):
+    nominees = data["nominees"]
+    idx = data["current_idx"]
+    total = len(nominees)
+    nominee = nominees[idx]
+    scores = data.get("scores", {})
+
+    builder = InlineKeyboardBuilder()
+    for star in range(1, 6):
+        emoji = "⭐" * star
+        current = scores.get(str(nominee["id"]))
+        mark = " ✅" if current == star else ""
+        builder.button(
+            text=f"{emoji}{mark}",
+            callback_data=f"rv_score:{data['round_id']}:{nominee['id']}:{star}"
+        )
+    builder.adjust(5)
+
+    # Навигация
+    nav_row = []
+    if idx > 0:
+        nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data="rv_prev"))
+    if idx < total - 1:
+        nav_row.append(InlineKeyboardButton(text="▶️ Далее", callback_data="rv_next"))
+    if nav_row:
+        builder.row(*nav_row)
+
+    already_scored = str(nominee["id"]) in scores
+    if idx == total - 1 and already_scored:
+        builder.row(InlineKeyboardButton(text="✅ Отправить голоса", callback_data="rv_submit"))
+    elif all(str(n["id"]) in scores for n in nominees):
+        builder.row(InlineKeyboardButton(text="✅ Отправить голоса", callback_data="rv_submit"))
+
+    text = (
+        f"⭐ <b>Голосование</b> — {idx + 1}/{total}\n\n"
+        f"👤 <b>{nominee['name']}</b>\n\n"
+        f"Твоя оценка: {('⭐' * scores[str(nominee['id'])]) if str(nominee['id']) in scores else '<i>не выбрана</i>'}\n\n"
+        f"<i>Оцени от 1 (слабо) до 5 (отлично)</i>"
+    )
+
+    if edit:
+        await msg.edit_text(text, reply_markup=builder.as_markup())
+    else:
+        await msg.answer(text, reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("rv_score:"), StateFilter(RatingVoteFSM.voting))
+async def rv_record_score(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    parts = call.data.split(":")
+    round_id, nominee_id, score = int(parts[1]), str(parts[2]), int(parts[3])
+
+    data = await state.get_data()
+    scores = dict(data.get("scores", {}))
+    scores[nominee_id] = score
+    await state.update_data(scores=scores)
+
+    # Автоматически перейти к следующему
+    nominees = data["nominees"]
+    idx = data["current_idx"]
+    if idx < len(nominees) - 1:
+        await state.update_data(current_idx=idx + 1)
+
+    await _show_vote_nominee(call.message, {**data, "scores": scores,
+                                            "current_idx": min(idx + 1, len(nominees) - 1)}, edit=True)
+
+
+@router.callback_query(F.data == "rv_prev", StateFilter(RatingVoteFSM.voting))
+async def rv_prev(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    data = await state.get_data()
+    idx = max(0, data["current_idx"] - 1)
+    await state.update_data(current_idx=idx)
+    await _show_vote_nominee(call.message, {**data, "current_idx": idx}, edit=True)
+
+
+@router.callback_query(F.data == "rv_next", StateFilter(RatingVoteFSM.voting))
+async def rv_next(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    data = await state.get_data()
+    nominees = data["nominees"]
+    idx = min(len(nominees) - 1, data["current_idx"] + 1)
+    await state.update_data(current_idx=idx)
+    await _show_vote_nominee(call.message, {**data, "current_idx": idx}, edit=True)
+
+
+@router.callback_query(F.data == "rv_submit", StateFilter(RatingVoteFSM.voting))
+async def rv_submit(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await call.answer()
+    data = await state.get_data()
+    await state.clear()
+
+    round_id = data["round_id"]
+    scores = data.get("scores", {})
+
+    # Получить voter_id
+    p_res = await session.execute(
+        select(Player).where(Player.telegram_id == call.from_user.id)
+    )
+    voter = p_res.scalar_one_or_none()
+    if not voter:
+        return
+
+    # Сохранить/обновить голоса (upsert через delete + insert)
+    from sqlalchemy import delete as sql_delete
+    await session.execute(
+        sql_delete(RatingVote).where(
+            RatingVote.round_id == round_id,
+            RatingVote.voter_id == voter.id,
+        )
+    )
+
+    for nominee_id_str, score in scores.items():
+        session.add(RatingVote(
+            round_id=round_id,
+            voter_id=voter.id,
+            nominee_id=int(nominee_id_str),
+            score=score,
+        ))
+
+    await session.commit()
+
+    total_voted = len(scores)
+    await call.message.edit_text(
+        f"✅ <b>Голоса отправлены!</b>\n\n"
+        f"Ты оценил {total_voted} игроков.\n"
+        "Спасибо! Результаты будут применены после завершения раунда. 🙏"
+    )
+
+
+@router.callback_query(F.data.startswith("rating_round_close:"))
+async def rating_round_close(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    from datetime import datetime
+    from sqlalchemy import func as sqlfunc
+    from app.keyboards.main_menu import admin_menu_kb
+
+    round_id = int(call.data.split(":")[1])
+    round_ = await session.get(RatingRound, round_id,
+                               options=[selectinload(RatingRound.votes)])
+    if not round_:
+        return
+
+    # Подсчитать средний рейтинг по каждому игроку
+    # Группировка вручную: nominee_id → list of scores
+    votes_map: dict[int, list[int]] = {}
+    for v in round_.votes:
+        votes_map.setdefault(v.nominee_id, []).append(v.score)
+
+    updated = 0
+    for nominee_id, vote_scores in votes_map.items():
+        player = await session.get(Player, nominee_id)
+        if not player:
+            continue
+        avg_vote = sum(vote_scores) / len(vote_scores)  # 1-5 scale
+        # Перевести в рейтинг 1-10: avg * 2
+        new_component = avg_vote * 2.0
+        # Смешать: 60% старый рейтинг + 40% новый из голосования
+        player.rating = round(player.rating * 0.6 + new_component * 0.4, 1)
+        player.rating_provisional = False
+        updated += 1
+
+    round_.status = "finished"
+    round_.finished_at = datetime.now()
+    await session.commit()
+
+    await call.message.edit_text(
+        f"✅ <b>Раунд голосования завершён!</b>\n\n"
+        f"📊 Обновлено рейтингов: <b>{updated}</b>\n"
+        f"📨 Голосов получено: <b>{len(round_.votes)}</b>\n\n"
+        "Новые рейтинги применены к игрокам.",
+        reply_markup=admin_menu_kb()
     )

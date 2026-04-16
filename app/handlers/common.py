@@ -55,13 +55,19 @@ async def cmd_start(message: Message, player: Player | None, state: FSMContext,
         )
         return
 
+    # Подсказка: если у игрока нет лиги — предложить создать или вступить
+    hint = ""
+    if not player.league_id:
+        hint = "\n\n💡 <i>У тебя нет лиги. /create_league — создай свою!</i>"
+
     await message.answer(
         f"⚽ Привет, <b>{player.name}</b>!\n\n"
         f"📍 Позиция: {POSITION_LABELS[player.position]}\n"
         f"⭐ Рейтинг: {player.rating:.1f}"
         + (" <i>(провизорный)</i>" if player.rating_provisional else "")
-        + f"\n💰 Баланс: {player.balance} сум.\n\n"
-        f"Выбери действие:",
+        + f"\n💰 Баланс: {player.balance} сум."
+        + hint
+        + "\n\nВыбери действие:",
         reply_markup=main_menu_kb()
     )
 
@@ -134,10 +140,28 @@ async def cb_reglament(call: CallbackQuery):
 
 
 @router.message(Command("admin"))
-async def cmd_admin(message: Message, player: Player | None, state: FSMContext):
+async def cmd_admin(message: Message, player: Player | None, state: FSMContext,
+                    session: AsyncSession):
     await state.clear()  # Сбросить любой активный FSM
-    if not settings.is_admin(message.from_user.id):
-        await message.answer("⛔ У тебя нет доступа к Админке.")
+
+    is_super = settings.is_admin(message.from_user.id)
+
+    # Проверить — является ли пользователь администратором лиги
+    is_league_admin = False
+    if not is_super:
+        league_res = await session.execute(
+            select(League).where(
+                League.admin_telegram_id == message.from_user.id,
+                League.is_active == True
+            )
+        )
+        is_league_admin = league_res.scalar_one_or_none() is not None
+
+    if not is_super and not is_league_admin:
+        await message.answer(
+            "⛔ У тебя нет доступа к Админке.\n\n"
+            "Создай свою лигу командой /create_league и стань администратором."
+        )
         return
 
     await message.answer(
