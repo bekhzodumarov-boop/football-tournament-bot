@@ -1307,7 +1307,6 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession):
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
         return
-    await call.answer("⏳ Создаю команды...")
 
     from app.database.models import (
         Team as TeamModel, TeamPlayer as TeamPlayerModel, Position
@@ -1329,101 +1328,117 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession):
         )
     )
     attendances = result.scalars().all()
-    players: list[Player] = [att.player for att in attendances]
+    # Фильтруем None на случай удалённых игроков
+    players: list[Player] = [att.player for att in attendances if att.player is not None]
 
+    # Проверка ДО call.answer — чтобы не вызывать его дважды
     if len(players) < num_teams:
-        await call.answer(f"❌ Недостаточно игроков для {num_teams} команд.", show_alert=True)
+        await call.answer(
+            f"❌ Недостаточно игроков: {len(players)} записано, нужно минимум {num_teams}.",
+            show_alert=True
+        )
         return
 
-    # Удалить старые команды (если были)
-    old_teams_result = await session.execute(
-        select(TeamModel).where(TeamModel.game_day_id == game_day_id)
-    )
-    old_teams = old_teams_result.scalars().all()
-    for old_team in old_teams:
-        await session.execute(
-            sql_delete(TeamPlayerModel).where(TeamPlayerModel.team_id == old_team.id)
+    await call.answer("⏳ Создаю команды...")
+
+    try:
+        # Удалить старые команды (если были)
+        old_teams_result = await session.execute(
+            select(TeamModel).where(TeamModel.game_day_id == game_day_id)
         )
-        await session.delete(old_team)
-    await session.flush()
+        old_teams = old_teams_result.scalars().all()
+        for old_team in old_teams:
+            await session.execute(
+                sql_delete(TeamPlayerModel).where(TeamPlayerModel.team_id == old_team.id)
+            )
+            await session.delete(old_team)
+        await session.flush()
 
-    # ── Алгоритм балансировки ──────────────────────────────────────
-    # 1. Разделить вратарей и полевых
-    goalkeepers = sorted(
-        [p for p in players if p.position == Position.GK],
-        key=lambda p: p.rating, reverse=True
-    )
-    field_players = sorted(
-        [p for p in players if p.position != Position.GK],
-        key=lambda p: p.rating, reverse=True
-    )
-
-    # 2. Создать команды
-    teams: list[TeamModel] = []
-    for i in range(num_teams):
-        team = TeamModel(
-            game_day_id=game_day_id,
-            name=TEAM_NAMES[i],
-            color_emoji=TEAM_COLORS[i],
+        # ── Алгоритм балансировки ──────────────────────────────────────
+        # 1. Разделить вратарей и полевых
+        goalkeepers = sorted(
+            [p for p in players if p.position == Position.GK],
+            key=lambda p: p.rating, reverse=True
         )
-        session.add(team)
-        teams.append(team)
-    await session.flush()  # получить id
+        field_players = sorted(
+            [p for p in players if p.position != Position.GK],
+            key=lambda p: p.rating, reverse=True
+        )
 
-    # 3. Распределить вратарей: по одному на команду, остальные — в полевые
-    team_players_buckets: list[list[Player]] = [[] for _ in range(num_teams)]
-    gk_warnings: list[str] = []
+        # 2. Создать команды
+        teams: list[TeamModel] = []
+        for i in range(num_teams):
+            team = TeamModel(
+                game_day_id=game_day_id,
+                name=TEAM_NAMES[i],
+                color_emoji=TEAM_COLORS[i],
+            )
+            session.add(team)
+            teams.append(team)
+        await session.flush()  # получить id
 
-    for i, gk in enumerate(goalkeepers):
-        if i < num_teams:
-            team_players_buckets[i].append(gk)
-        else:
-            field_players.append(gk)
-            field_players.sort(key=lambda p: p.rating, reverse=True)
+        # 3. Распределить вратарей: по одному на команду, остальные — в полевые
+        team_players_buckets: list[list[Player]] = [[] for _ in range(num_teams)]
+        gk_warnings: list[str] = []
 
-    if len(goalkeepers) < num_teams:
-        missing = num_teams - len(goalkeepers)
-        gk_warnings.append(f"⚠️ Не хватает {missing} вратар{'я' if missing == 1 else 'ей'}!")
+        for i, gk in enumerate(goalkeepers):
+            if i < num_teams:
+                team_players_buckets[i].append(gk)
+            else:
+                field_players.append(gk)
+                field_players.sort(key=lambda p: p.rating, reverse=True)
 
-    # 4. Snake draft полевых игроков по рейтингу
-    # Порядок: 0,1,2,...,n-1, n-1,...,1,0, 0,1,...
-    direction = 1
-    idx = 0
-    for player in field_players:
-        team_players_buckets[idx].append(player)
-        next_idx = idx + direction
-        if next_idx >= num_teams:
-            direction = -1
-            idx = num_teams - 1
-        elif next_idx < 0:
-            direction = 1
-            idx = 0
-        else:
-            idx = next_idx
+        if len(goalkeepers) < num_teams:
+            missing = num_teams - len(goalkeepers)
+            gk_warnings.append(f"⚠️ Не хватает {missing} вратар{'я' if missing == 1 else 'ей'}!")
 
-    # 5. Сохранить TeamPlayer записи
-    for i, team in enumerate(teams):
-        for player in team_players_buckets[i]:
-            session.add(TeamPlayerModel(team_id=team.id, player_id=player.id))
+        # 4. Snake draft полевых игроков по рейтингу
+        # Порядок: 0,1,2,...,n-1, n-1,...,1,0, 0,1,...
+        direction = 1
+        idx = 0
+        for player in field_players:
+            team_players_buckets[idx].append(player)
+            next_idx = idx + direction
+            if next_idx >= num_teams:
+                direction = -1
+                idx = num_teams - 1
+            elif next_idx < 0:
+                direction = 1
+                idx = 0
+            else:
+                idx = next_idx
 
-    await session.commit()
+        # 5. Сохранить TeamPlayer записи
+        for i, team in enumerate(teams):
+            for player in team_players_buckets[i]:
+                session.add(TeamPlayerModel(team_id=team.id, player_id=player.id))
 
-    # ── Формирование результата ────────────────────────────────────
-    from app.keyboards.game_day import game_day_action_kb
+        await session.commit()
 
-    lines = ["🎲 <b>Команды созданы!</b>\n"]
-    for i, team in enumerate(teams):
-        bucket = team_players_buckets[i]
-        avg_rating = sum(p.rating for p in bucket) / len(bucket) if bucket else 0
-        lines.append(f"\n{team.color_emoji} <b>{team.name}</b> (⭐{avg_rating:.1f}):")
-        for player in bucket:
-            pos = POSITION_LABELS.get(player.position, player.position)
-            lines.append(f"  • {player.name} — {pos}, ⭐{player.rating:.1f}")
+        # ── Формирование результата ────────────────────────────────────
+        from app.keyboards.game_day import game_day_action_kb
 
-    if gk_warnings:
-        lines.append("\n" + "\n".join(gk_warnings))
+        lines = ["🎲 <b>Команды созданы!</b>\n"]
+        for i, team in enumerate(teams):
+            bucket = team_players_buckets[i]
+            avg_rating = sum(p.rating for p in bucket) / len(bucket) if bucket else 0
+            lines.append(f"\n{team.color_emoji} <b>{team.name}</b> (⭐{avg_rating:.1f}):")
+            for player in bucket:
+                pos = POSITION_LABELS.get(player.position, player.position)
+                lines.append(f"  • {player.name} — {pos}, ⭐{player.rating:.1f}")
 
-    await call.message.edit_text(
-        "\n".join(lines),
-        reply_markup=game_day_action_kb(game_day_id)
-    )
+        if gk_warnings:
+            lines.append("\n" + "\n".join(gk_warnings))
+
+        await call.message.edit_text(
+            "\n".join(lines),
+            reply_markup=game_day_action_kb(game_day_id)
+        )
+
+    except Exception as e:
+        await session.rollback()
+        from app.keyboards.game_day import game_day_action_kb
+        await call.message.edit_text(
+            f"❌ <b>Ошибка при создании команд:</b>\n<code>{e}</code>",
+            reply_markup=game_day_action_kb(game_day_id)
+        )
