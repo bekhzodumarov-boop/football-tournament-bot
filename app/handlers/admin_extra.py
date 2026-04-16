@@ -1260,7 +1260,7 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
     from app.database.models import POSITION_LABELS
     from app.keyboards.game_day import game_day_action_kb
 
-    # Если команды уже созданы — показываем их, жеребьёвка не повторяется
+    # Если жеребьёвка уже была — показываем команды (только если в них есть игроки)
     existing_res = await session.execute(
         select(TeamModel)
         .options(selectinload(TeamModel.players).selectinload(TeamPlayerModel.player))
@@ -1268,7 +1268,10 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
     )
     existing_teams = existing_res.scalars().all()
 
-    if existing_teams:
+    # Считаем жеребьёвку проведённой только если хотя бы в одной команде есть игроки
+    has_players = any(len(team.players) > 0 for team in existing_teams)
+
+    if existing_teams and has_players:
         game_day = await session.get(GameDay, game_day_id)
         gd_name = game_day.display_name if game_day else f"#{game_day_id}"
         lines = [f"🎲 <b>Команды ({gd_name})</b>\n",
