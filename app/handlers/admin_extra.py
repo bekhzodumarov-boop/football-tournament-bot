@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
-    Player, PlayerStatus, Match, League, RatingRound, RatingVote,
+    Player, PlayerStatus, Match, Goal, Card, League, RatingRound, RatingVote,
 )
 from app.database.models import _gen_invite_code
 
@@ -1345,12 +1345,37 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
         select(TeamModel).where(TeamModel.game_day_id == game_day_id)
     )
     old_teams = old_teams_result.scalars().all()
-    for old_team in old_teams:
-        await session.execute(
-            sql_delete(TeamPlayerModel).where(TeamPlayerModel.team_id == old_team.id)
+    if old_teams:
+        old_team_ids = [t.id for t in old_teams]
+
+        # Найти матчи этих команд
+        old_matches_result = await session.execute(
+            select(Match).where(
+                (Match.team_home_id.in_(old_team_ids)) |
+                (Match.team_away_id.in_(old_team_ids))
+            )
         )
-        await session.delete(old_team)
-    await session.flush()
+        old_matches = old_matches_result.scalars().all()
+        old_match_ids = [m.id for m in old_matches]
+
+        # Удалить: голы → карточки → матчи → состав → команды
+        if old_match_ids:
+            await session.execute(
+                sql_delete(Goal).where(Goal.match_id.in_(old_match_ids))
+            )
+            await session.execute(
+                sql_delete(Card).where(Card.match_id.in_(old_match_ids))
+            )
+            await session.execute(
+                sql_delete(Match).where(Match.id.in_(old_match_ids))
+            )
+        await session.execute(
+            sql_delete(TeamPlayerModel).where(TeamPlayerModel.team_id.in_(old_team_ids))
+        )
+        await session.execute(
+            sql_delete(TeamModel).where(TeamModel.id.in_(old_team_ids))
+        )
+        await session.flush()
 
     # ── Алгоритм балансировки ──────────────────────────────────────────
     goalkeepers = sorted(
