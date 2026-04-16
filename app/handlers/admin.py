@@ -1,5 +1,8 @@
 from aiogram import Router, F, Bot
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +15,10 @@ from app.database.models import (
 from app.keyboards.game_day import game_day_action_kb, join_game_kb, delete_confirm_kb
 
 router = Router()
+
+
+class BroadcastFSM(StatesGroup):
+    waiting_text = State()
 
 
 def admin_only(func):
@@ -172,7 +179,7 @@ async def gd_payment(call: CallbackQuery, session: AsyncSession):
             callback_data=f"toggle_pay:{game_day_id}:{att.player_id}"
         )
     builder.adjust(1)
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_manage:{game_day_id}"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
 
     await call.message.edit_text(
         f"💰 <b>Оплата — {game_day.scheduled_at.strftime('%d.%m.%Y')}</b>\n\n"
@@ -336,9 +343,11 @@ async def gd_delete_execute(call: CallbackQuery, session: AsyncSession):
 
     await session.commit()
 
+    from app.keyboards.main_menu import admin_menu_kb
     await call.message.edit_text(
         "🗑 <b>Игровой день удалён.</b>\n\n"
-        "Все связанные данные (команды, матчи, записи, оплаты) удалены."
+        "Все связанные данные (команды, матчи, записи, оплаты) удалены.",
+        reply_markup=admin_menu_kb(),
     )
 
 
@@ -519,6 +528,130 @@ async def adm_back_to_menu(call: CallbackQuery):
 
 
 # ══════════════════════════════════════════════════════
+#  РАССЫЛКА — Broadcast
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_broadcast")
+async def adm_broadcast_start(call: CallbackQuery, state: FSMContext):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    from app.keyboards.main_menu import admin_menu_kb
+    cancel_kb = InlineKeyboardBuilder()
+    cancel_kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back"))
+
+    await state.set_state(BroadcastFSM.waiting_text)
+    await call.message.edit_text(
+        "📢 <b>Рассылка всем игрокам</b>\n\n"
+        "Напиши текст сообщения. Поддерживается HTML-форматирование:\n"
+        "<code>&lt;b&gt;жирный&lt;/b&gt;</code>, <code>&lt;i&gt;курсив&lt;/i&gt;</code>, "
+        "<code>&lt;a href='...'&gt;ссылка&lt;/a&gt;</code>\n\n"
+        "Отправь сообщение или нажми Отмена:",
+        reply_markup=cancel_kb.as_markup(),
+    )
+
+
+@router.message(StateFilter(BroadcastFSM.waiting_text))
+async def adm_broadcast_send(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
+    if not settings.is_admin(message.from_user.id):
+        return
+
+    text = message.text or message.caption or ""
+    if not text.strip():
+        await message.answer("❌ Пустое сообщение. Попробуй снова или нажми Отмена.")
+        return
+
+    await state.clear()
+
+    result = await session.execute(select(Player))
+    players = result.scalars().all()
+
+    sent = 0
+    failed = 0
+    for player in players:
+        try:
+            await bot.send_message(player.telegram_id, text)
+            sent += 1
+        except Exception:
+            failed += 1
+
+    from app.keyboards.main_menu import admin_menu_kb
+    summary = (
+        f"📢 <b>Рассылка завершена</b>\n\n"
+        f"✅ Доставлено: <b>{sent}</b>\n"
+        f"❌ Не доставлено: <b>{failed}</b>"
+    )
+    await message.answer(summary, reply_markup=admin_menu_kb())
+
+
+# ══════════════════════════════════════════════════════
+#  ОПЛАТА — обзор по всем активным игровым дням
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_payments")
+async def adm_payments_overview(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    from app.keyboards.main_menu import admin_menu_kb
+    from datetime import datetime
+
+    # Берём игровые дни, которые не удалены (не CANCELLED) и не в далёком прошлом
+    result = await session.execute(
+        select(GameDay)
+        .where(GameDay.status != GameDayStatus.CANCELLED)
+        .order_by(GameDay.scheduled_at.desc())
+        .limit(10)
+    )
+    game_days = result.scalars().all()
+
+    if not game_days:
+        await call.message.edit_text(
+            "💳 Нет активных игровых дней.",
+            reply_markup=admin_menu_kb(),
+        )
+        return
+
+    builder = InlineKeyboardBuilder()
+    for gd in game_days:
+        # Считаем: записалось / оплатило
+        att_result = await session.execute(
+            select(Attendance).where(
+                Attendance.game_day_id == gd.id,
+                Attendance.response == AttendanceResponse.YES,
+            )
+        )
+        attendances = att_result.scalars().all()
+        total = len(attendances)
+
+        pay_result = await session.execute(
+            select(Payment).where(
+                Payment.game_day_id == gd.id,
+                Payment.paid == True,  # noqa: E712
+            )
+        )
+        paid_count = len(pay_result.scalars().all())
+
+        date_str = gd.scheduled_at.strftime("%d.%m")
+        builder.row(InlineKeyboardButton(
+            text=f"📅 {date_str} — {paid_count}/{total} оплатили",
+            callback_data=f"gd_payment:{gd.id}",
+        ))
+
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back"))
+
+    await call.message.edit_text(
+        "💳 <b>Оплата по игровым дням</b>\n\n"
+        "Нажми на игровой день чтобы отметить оплаты:",
+        reply_markup=builder.as_markup(),
+    )
+
+
+# ══════════════════════════════════════════════════════
 #  ЭКСПОРТ В GOOGLE SHEETS
 # ══════════════════════════════════════════════════════
 
@@ -529,8 +662,10 @@ async def adm_export_sheets(call: CallbackQuery, session: AsyncSession):
         return
     await call.answer()
 
+    from app.keyboards.main_menu import admin_menu_kb
+
     if not settings.GOOGLE_CREDENTIALS_JSON or not settings.GOOGLE_SHEET_ID:
-        await call.message.answer(
+        await call.message.edit_text(
             "⚙️ <b>Экспорт в Google Sheets не настроен</b>\n\n"
             "Чтобы включить экспорт:\n\n"
             "1. Зайди на <a href='https://console.cloud.google.com'>console.cloud.google.com</a>\n"
@@ -541,22 +676,25 @@ async def adm_export_sheets(call: CallbackQuery, session: AsyncSession):
             "   <code>GOOGLE_SHEET_ID</code> = ID из URL таблицы\n"
             "5. Создай Google-таблицу и открой доступ сервисному аккаунту\n\n"
             "<i>Email сервисного аккаунта указан в JSON в поле client_email</i>",
-            disable_web_page_preview=True
+            reply_markup=admin_menu_kb(),
+            disable_web_page_preview=True,
         )
         return
 
-    await call.message.answer("⏳ Экспортирую данные в Google Sheets…")
+    await call.message.edit_text("⏳ Экспортирую данные в Google Sheets…")
 
     try:
         from app.google_sheets import export_to_sheets
         url = await export_to_sheets(session)
-        await call.message.answer(
+        await call.message.edit_text(
             f"✅ <b>Экспорт завершён!</b>\n\n"
             f"📊 Данные обновлены в таблице:\n{url}\n\n"
-            "Листы: 📊 Таблица · ⚽ Матчи · 👥 Игроки"
+            "Листы: 📊 Таблица · ⚽ Матчи · 👥 Игроки",
+            reply_markup=admin_menu_kb(),
         )
     except Exception as e:
-        await call.message.answer(
+        await call.message.edit_text(
             f"❌ <b>Ошибка экспорта:</b>\n<code>{e}</code>\n\n"
-            "Проверь правильность GOOGLE_CREDENTIALS_JSON и GOOGLE_SHEET_ID."
+            "Проверь правильность GOOGLE_CREDENTIALS_JSON и GOOGLE_SHEET_ID.",
+            reply_markup=admin_menu_kb(),
         )
