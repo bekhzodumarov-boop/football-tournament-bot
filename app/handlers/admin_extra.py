@@ -226,7 +226,12 @@ async def adm_past_detail(call: CallbackQuery, session: AsyncSession):
     if attendees:
         lines.append("👥 <b>Участники:</b>")
         for a in attendees[:15]:
-            lines.append(f"  • {a.player.name}")
+            p = a.player
+            if p.username:
+                tg_ref = f' <a href="https://t.me/{p.username}">@{p.username}</a>'
+            else:
+                tg_ref = f' <a href="tg://user?id={p.telegram_id}">💬</a>'
+            lines.append(f"  • {p.name}{tg_ref}")
         if len(attendees) > 15:
             lines.append(f"  ...и ещё {len(attendees) - 15} чел.")
 
@@ -1365,7 +1370,12 @@ async def auto_teams_start(call: CallbackQuery, session: AsyncSession):
                 for tp in tps:
                     if tp.player:
                         pos = POSITION_LABELS.get(tp.player.position, tp.player.position)
-                        lines.append(f"  • {tp.player.name} — {pos}")
+                        p = tp.player
+                        if p.username:
+                            tg_ref = f' <a href="https://t.me/{p.username}">@{p.username}</a>'
+                        else:
+                            tg_ref = f' <a href="tg://user?id={p.telegram_id}">💬</a>'
+                        lines.append(f"  • {p.name}{tg_ref} — {pos}")
             else:
                 lines.append("  <i>нет игроков</i>")
 

@@ -109,6 +109,10 @@ async def _run_migrations(conn):
             await conn.execute(text(
                 "ALTER TABLE players ADD COLUMN language VARCHAR(5) NOT NULL DEFAULT 'ru'"
             ))
+        if "gender" not in player_cols2:
+            await conn.execute(text(
+                "ALTER TABLE players ADD COLUMN gender VARCHAR(1) NOT NULL DEFAULT 'm'"
+            ))
     else:
         # PostgreSQL
         await conn.execute(text(
@@ -143,6 +147,9 @@ async def _run_migrations(conn):
         ))
         await conn.execute(text(
             "ALTER TABLE players ADD COLUMN IF NOT EXISTS language VARCHAR(5) DEFAULT 'ru' NOT NULL"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE players ADD COLUMN IF NOT EXISTS gender VARCHAR(1) DEFAULT 'm' NOT NULL"
         ))
 
 

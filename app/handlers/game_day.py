@@ -18,7 +18,7 @@ from app.database.models import (
 from app.keyboards.game_day import join_game_kb, join_confirm_kb, game_day_action_kb
 from app.data.reglament import REGLAMENT_AGREEMENT, REGLAMENT_AGREEMENT_EN
 from app.reminders import schedule_reminders
-from app.locales.texts import t
+from app.locales.texts import t, t_g
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -90,7 +90,9 @@ async def show_next_game(event, session: AsyncSession, player: Player | None):
         )
         att = att_result.scalar_one_or_none()
         if att and att.response == AttendanceResponse.YES:
-            player_status = "\n\n✅ <b>Ты записан на эту игру!</b>"
+            _gender = getattr(player, 'gender', 'm') or 'm'
+            _signed = "записана" if _gender == 'f' else "записан"
+            player_status = f"\n\n✅ <b>Ты {_signed} на эту игру!</b>"
         elif att and att.response == AttendanceResponse.WAITLIST:
             waitlist_list = [
                 a for a in game_day.attendances
@@ -223,8 +225,9 @@ async def join_game(call: CallbackQuery, session: AsyncSession, player: Player |
         await session.commit()
 
         lang = getattr(player, 'language', None) or 'ru'
+        gender = getattr(player, 'gender', 'm') or 'm'
         await call.message.edit_text(
-            t('join_waitlist', lang, position=my_position)
+            t_g('join_waitlist', lang, gender, position=my_position)
         )
         return
 
@@ -246,10 +249,11 @@ async def join_game(call: CallbackQuery, session: AsyncSession, player: Player |
     await session.commit()
 
     lang = getattr(player, 'language', None) or 'ru'
+    gender = getattr(player, 'gender', 'm') or 'm'
     await call.message.edit_text(
-        t('join_success', lang,
-          date=game_day.scheduled_at.strftime('%d.%m.%Y %H:%M'),
-          location=game_day.location)
+        t_g('join_success', lang, gender,
+            date=game_day.scheduled_at.strftime('%d.%m.%Y %H:%M'),
+            location=game_day.location)
     )
 
 
@@ -286,7 +290,8 @@ async def decline_game(call: CallbackQuery, session: AsyncSession,
 
     await session.commit()
     lang = getattr(player, 'language', None) or 'ru'
-    await call.message.edit_text(t('join_declined', lang))
+    gender = getattr(player, 'gender', 'm') or 'm'
+    await call.message.edit_text(t_g('join_declined', lang, gender))
 
     if was_confirmed:
         await _notify_first_waitlist(session, game_day_id, bot)
@@ -313,11 +318,12 @@ async def _notify_first_waitlist(session: AsyncSession, game_day_id: int, bot: B
 
     try:
         lang = getattr(first.player, 'language', None) or 'ru'
+        gender = getattr(first.player, 'gender', 'm') or 'm'
         await bot.send_message(
             first.player.telegram_id,
-            t('waitlist_promoted', lang,
-              date=game_day.scheduled_at.strftime('%d.%m.%Y %H:%M'),
-              location=game_day.location),
+            t_g('waitlist_promoted', lang, gender,
+                date=game_day.scheduled_at.strftime('%d.%m.%Y %H:%M'),
+                location=game_day.location),
             reply_markup=join_game_kb(game_day_id, game_day.is_open, lang)
         )
     except Exception as e:

@@ -14,7 +14,7 @@ from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
     Player, Payment, Team, TeamPlayer, Match, Goal, Card,
-    League, RatingVote,
+    League, RatingVote, RatingRound,
 )
 from app.keyboards.game_day import game_day_action_kb, join_game_kb, delete_confirm_kb
 
@@ -73,10 +73,176 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
     for i, att in enumerate(attendances, 1):
         p = att.player
         pos = POSITION_LABELS.get(p.position, p.position)
-        lines.append(f"{i}. <b>{p.name}</b> — {pos}, ⭐{p.rating:.1f}")
+        if p.username:
+            tg_ref = f' <a href="https://t.me/{p.username}">@{p.username}</a>'
+        else:
+            tg_ref = f' <a href="tg://user?id={p.telegram_id}">💬</a>'
+        lines.append(f"{i}. <b>{p.name}</b>{tg_ref} — {pos}, ⭐{p.rating:.1f}")
+
+    action_kb = game_day_action_kb(game_day_id)
+    # Inject "kick player" button into the action keyboard
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+    builder = IKB()
+    builder.row(InlineKeyboardButton(
+        text="❌ Убрать игрока из записи",
+        callback_data=f"gd_kick_list:{game_day_id}"
+    ))
+    for row in action_kb.inline_keyboard:
+        builder.row(*row)
 
     await call.message.edit_text(
         "\n".join(lines),
+        reply_markup=builder.as_markup()
+    )
+
+
+# ---------- Убрать игрока из записи ----------
+
+@router.callback_query(F.data.startswith("gd_kick_list:"))
+async def gd_kick_list(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+
+    result = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES
+        )
+    )
+    attendances = result.scalars().all()
+
+    if not attendances:
+        await call.message.edit_text(
+            "📭 Никто не записан — некого убирать.",
+            reply_markup=game_day_action_kb(game_day_id)
+        )
+        return
+
+    gd_name = game_day.display_name if game_day else f"#{game_day_id}"
+    builder = InlineKeyboardBuilder()
+    for att in attendances:
+        p = att.player
+        builder.row(InlineKeyboardButton(
+            text=f"❌ {p.name}",
+            callback_data=f"gd_kick_confirm:{game_day_id}:{p.id}"
+        ))
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data=f"gd_players:{game_day_id}"
+    ))
+
+    await call.message.edit_text(
+        f"❌ <b>Убрать игрока из записи — {gd_name}</b>\n\n"
+        "Выбери игрока которого нужно убрать:",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("gd_kick_confirm:"))
+async def gd_kick_confirm_cb(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    parts = call.data.split(":")
+    game_day_id = int(parts[1])
+    player_id = int(parts[2])
+
+    player = await session.get(Player, player_id)
+    if not player:
+        await call.message.edit_text("❌ Игрок не найден.")
+        return
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Да, убрать",
+            callback_data=f"gd_kick_ok:{game_day_id}:{player_id}"
+        ),
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data=f"gd_kick_list:{game_day_id}"
+        )
+    )
+
+    await call.message.edit_text(
+        f"⚠️ <b>Убрать игрока из записи?</b>\n\n"
+        f"👤 <b>{player.name}</b>\n\n"
+        "Игрок будет переведён в статус «Не идёт».\n"
+        "Следующий из листа ожидания получит уведомление.",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("gd_kick_ok:"))
+async def gd_kick_execute(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("⏳ Убираю игрока...")
+
+    parts = call.data.split(":")
+    game_day_id = int(parts[1])
+    player_id = int(parts[2])
+
+    # Найти запись
+    result = await session.execute(
+        select(Attendance).where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.player_id == player_id
+        )
+    )
+    att = result.scalar_one_or_none()
+    if not att:
+        await call.message.edit_text("❌ Запись не найдена.", reply_markup=game_day_action_kb(game_day_id))
+        return
+
+    player = await session.get(Player, player_id)
+    player_name = player.name if player else f"#{player_id}"
+
+    from datetime import datetime
+    att.response = AttendanceResponse.NO
+    att.responded_at = datetime.now()
+    await session.commit()
+
+    # Уведомить игрока
+    if player:
+        game_day = await session.get(GameDay, game_day_id)
+        try:
+            lang = getattr(player, 'language', None) or 'ru'
+            if lang == 'en':
+                kick_text = (
+                    f"ℹ️ <b>Registration cancelled</b>\n\n"
+                    f"The organizer has removed you from the roster for "
+                    f"<b>{game_day.display_name if game_day else '—'}</b>.\n\n"
+                    "Contact the organizer if you have questions."
+                )
+            else:
+                kick_text = (
+                    f"ℹ️ <b>Запись отменена</b>\n\n"
+                    f"Организатор убрал тебя из состава на "
+                    f"<b>{game_day.display_name if game_day else '—'}</b>.\n\n"
+                    "Если есть вопросы — напиши организатору."
+                )
+            await bot.send_message(player.telegram_id, kick_text)
+        except Exception as e:
+            logger.warning(f"Cannot notify kicked player {player_id}: {e}")
+
+    # Уведомить первого из листа ожидания
+    from app.handlers.game_day import _notify_first_waitlist
+    await _notify_first_waitlist(session, game_day_id, bot)
+
+    await call.message.edit_text(
+        f"✅ <b>{player_name}</b> убран из записи.\n\n"
+        "Следующий игрок из листа ожидания получил уведомление.",
         reply_markup=game_day_action_kb(game_day_id)
     )
 
@@ -379,6 +545,15 @@ async def gd_delete_execute(call: CallbackQuery, session: AsyncSession):
     if team_ids:
         await session.execute(sql_delete(TeamPlayer).where(TeamPlayer.team_id.in_(team_ids)))
         await session.execute(sql_delete(Team).where(Team.id.in_(team_ids)))
+
+    # Delete rating votes and rounds tied to this game day
+    rating_rounds_res = await session.execute(
+        select(RatingRound.id).where(RatingRound.game_day_id == game_day_id)
+    )
+    rating_round_ids = [r[0] for r in rating_rounds_res.all()]
+    if rating_round_ids:
+        await session.execute(sql_delete(RatingVote).where(RatingVote.round_id.in_(rating_round_ids)))
+        await session.execute(sql_delete(RatingRound).where(RatingRound.id.in_(rating_round_ids)))
 
     await session.execute(sql_delete(Attendance).where(Attendance.game_day_id == game_day_id))
     await session.execute(sql_delete(Payment).where(Payment.game_day_id == game_day_id))

@@ -234,7 +234,11 @@ async def cb_players_list(call: CallbackQuery, session: AsyncSession, player: Pl
     for i, p in enumerate(players, 1):
         pos = POSITION_LABELS.get(p.position, p.position)
         provisional = " <i>(пров.)</i>" if p.rating_provisional else ""
-        lines.append(f"{i}. <b>{p.name}</b> — {pos}, ⭐{p.rating:.1f}{provisional}")
+        if p.username:
+            name_part = f'<a href="https://t.me/{p.username}">{p.name}</a>'
+        else:
+            name_part = f'<b>{p.name}</b>'
+        lines.append(f"{i}. {name_part} — {pos}, ⭐{p.rating:.1f}{provisional}")
 
     await call.message.edit_text("\n".join(lines), reply_markup=main_menu_kb(lang))
 

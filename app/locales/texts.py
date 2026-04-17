@@ -12,6 +12,16 @@ def t(key: str, lang: str = "ru", **kwargs) -> str:
     return text
 
 
+def t_g(key: str, lang: str = "ru", gender: str = "m", **kwargs) -> str:
+    """Get text with gender awareness. Uses {key}_f for Russian feminine forms."""
+    if lang == "ru" and gender == "f":
+        feminine_key = f"{key}_f"
+        text = TEXTS.get(lang, {}).get(feminine_key)
+        if text:
+            return text.format(**kwargs) if kwargs else text
+    return t(key, lang, **kwargs)
+
+
 def goals_word(count: int, lang: str = "ru") -> str:
     """Return correct plural form of 'goal' / 'гол'."""
     if lang == "en":
@@ -62,6 +72,11 @@ TEXTS = {
             "Добро пожаловать в лигу! ⚽"
         ),
         "reg_already": "✅ Ты уже зарегистрирован! Используй /start для главного меню.",
+        "choose_gender": (
+            "👤 <b>Как к тебе обращаться?</b>\n\n"
+            "Это нужно чтобы бот обращался к тебе правильно."
+        ),
+        "gender_set": "✅ Готово! Обращение сохранено.",
         "choose_language": "🌐 <b>Выбери язык / Choose language:</b>",
         "lang_set_ru": "✅ Язык изменён на Русский 🇷🇺",
         "lang_set_en": "✅ Language changed to English 🇬🇧",
@@ -113,11 +128,18 @@ TEXTS = {
             "📍 {location}\n\n"
             "Бот напомнит за 2 часа до начала."
         ),
+        "join_success_f": (
+            "✅ <b>Ты записана на игру!</b>\n\n"
+            "📅 {date}\n"
+            "📍 {location}\n\n"
+            "Бот напомнит за 2 часа до начала."
+        ),
         "join_waitlist": (
             "⏳ Мест нет — ты в листе ожидания <b>#{position}</b>.\n\n"
             "Как только кто-то откажется — получишь уведомление."
         ),
         "join_declined": "❌ Ты отказался от участия.\n\nЕсли передумаешь — запишись снова.",
+        "join_declined_f": "❌ Ты отказалась от участия.\n\nЕсли передумаешь — запишись снова.",
         "confirm_reminder": (
             "⏰ <b>Напоминание!</b>\n\n"
             "Игра через 2 часа!\n"
@@ -131,6 +153,12 @@ TEXTS = {
         "waitlist_promoted": (
             "🎉 <b>Место освободилось!</b>\n\n"
             "Ты переведён из листа ожидания в основной состав!\n\n"
+            "📅 {date}\n"
+            "📍 {location}"
+        ),
+        "waitlist_promoted_f": (
+            "🎉 <b>Место освободилось!</b>\n\n"
+            "Ты переведена из листа ожидания в основной состав!\n\n"
             "📅 {date}\n"
             "📍 {location}"
         ),

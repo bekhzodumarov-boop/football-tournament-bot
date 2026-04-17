@@ -19,6 +19,7 @@ class RegistrationFSM(StatesGroup):
     waiting_name = State()
     waiting_position = State()
     waiting_self_rating = State()
+    waiting_gender = State()
     waiting_phone = State()
     waiting_photo = State()
 
@@ -107,12 +108,32 @@ async def reg_self_rating(call: CallbackQuery, state: FSMContext):
     await state.update_data(self_rating=self_rating)
     await call.answer()
 
+    gender_kb = InlineKeyboardBuilder()
+    gender_kb.row(
+        InlineKeyboardButton(text="👨 Мужской (он)", callback_data="reg_gender:m"),
+        InlineKeyboardButton(text="👩 Женский (она)", callback_data="reg_gender:f"),
+    )
+
+    await call.message.edit_text(
+        f"✅ Оценка: <b>{self_rating}/10</b>\n\n"
+        "Шаг 4/6: Как к тебе обращаться? 👤\n\n"
+        "<i>Бот будет использовать правильное обращение в сообщениях</i>",
+        reply_markup=gender_kb.as_markup()
+    )
+    await state.set_state(RegistrationFSM.waiting_gender)
+
+
+@router.callback_query(RegistrationFSM.waiting_gender, F.data.startswith("reg_gender:"))
+async def reg_gender(call: CallbackQuery, state: FSMContext):
+    gender = call.data.split(":")[1]  # "m" or "f"
+    await state.update_data(gender=gender)
+    await call.answer()
+
     skip_kb = InlineKeyboardBuilder()
     skip_kb.row(InlineKeyboardButton(text="⏭ Пропустить", callback_data="reg_skip_phone"))
 
     await call.message.edit_text(
-        f"✅ Оценка: <b>{self_rating}/10</b>\n\n"
-        "Шаг 4/5: Напиши свой <b>номер телефона</b> 📱\n\n"
+        "Шаг 5/6: Напиши свой <b>номер телефона</b> 📱\n\n"
         "<i>Например: +998901234567\n"
         "Если не хочешь — нажми Пропустить</i>",
         reply_markup=skip_kb.as_markup()
@@ -125,7 +146,7 @@ async def reg_skip_phone(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await state.update_data(phone=None)
     await call.message.edit_text(
-        "Шаг 5/5: Пришли своё фото 📸\n\n"
+        "Шаг 6/6: Пришли своё фото 📸\n\n"
         "<i>Это фото будет отображаться в твоём профиле.\n"
         "Если не хочешь — напиши /skip</i>"
     )
@@ -147,7 +168,7 @@ async def reg_phone(message: Message, state: FSMContext):
     await state.update_data(phone=phone)
     await message.answer(
         f"✅ Телефон: <b>{phone}</b>\n\n"
-        "Шаг 5/5: Пришли своё фото 📸\n\n"
+        "Шаг 6/6: Пришли своё фото 📸\n\n"
         "<i>Это фото будет отображаться в твоём профиле.\n"
         "Если не хочешь — напиши /skip</i>"
     )
@@ -207,6 +228,7 @@ async def _finish_registration(message: Message, state: FSMContext,
         rating_provisional=True,
         photo_file_id=photo_file_id,
         phone=data.get("phone"),
+        gender=data.get("gender", "m"),
         league_id=league_id,
     )
     session.add(new_player)
