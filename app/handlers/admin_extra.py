@@ -2145,20 +2145,16 @@ async def gd_post_results(call: CallbackQuery, session: AsyncSession, bot: Bot):
 
 
 # ══════════════════════════════════════════════════════
-#  В КАНАЛ (I-043)
+#  В КАНАЛ (I-043) — превью поста в боте
 # ══════════════════════════════════════════════════════
 
 @router.callback_query(F.data.startswith("gd_to_channel:"))
-async def gd_to_channel(call: CallbackQuery, session: AsyncSession, bot: Bot):
-    """Публикует итоги турнира в настроенный Telegram-канал."""
+async def gd_to_channel(call: CallbackQuery, session: AsyncSession):
+    """Присылает готовый пост-итоги в текущий чат (превью для ручной публикации)."""
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
         return
     await call.answer()
-
-    if not settings.CHANNEL_ID:
-        await call.answer(t('channel_not_set', 'ru'), show_alert=True)
-        return
 
     from collections import Counter
     from app.keyboards.game_day import game_day_action_kb
@@ -2183,7 +2179,7 @@ async def gd_to_channel(call: CallbackQuery, session: AsyncSession, bot: Bot):
         await call.answer("⚠️ Нет завершённых матчей.", show_alert=True)
         return
 
-    # Строим пост для канала
+    # Определяем места по финалу
     place_teams: dict[int, int] = {}
     final_match = next((m for m in finished_matches if (m.match_stage or "group") == "final"), None)
     third_match = next((m for m in finished_matches if (m.match_stage or "group") == "third_place"), None)
@@ -2207,11 +2203,29 @@ async def gd_to_channel(call: CallbackQuery, session: AsyncSession, bot: Bot):
     lines = [f"🏆 <b>Итоги {game_day.display_name}</b>"]
     lines.append(f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y')} | 📍 {game_day.location}\n")
 
-    lines.append("<b>Результаты матчей:</b>")
-    for m in finished_matches:
-        lines.append(f"  ⚽ {m.team_home.name} {m.score_home}:{m.score_away} {m.team_away.name}")
-    lines.append("")
+    # Групповые матчи
+    group_matches = [m for m in finished_matches if (m.match_stage or "group") == "group"]
+    if group_matches:
+        lines.append("<b>Групповой этап:</b>")
+        for m in group_matches:
+            lines.append(f"  {m.team_home.name} {m.score_home}:{m.score_away} {m.team_away.name}")
 
+    # Плей-офф матчи
+    playoff = [m for m in finished_matches if (m.match_stage or "group") != "group"]
+    if playoff:
+        lines.append("\n<b>Плей-офф:</b>")
+        stage_labels = {"semifinal": "Полуфинал", "third_place": "Матч за 3-е", "final": "Финал"}
+        semi_n = 0
+        for m in playoff:
+            stage = m.match_stage or "group"
+            if stage == "semifinal":
+                semi_n += 1
+                label = f"Полуфинал {semi_n}"
+            else:
+                label = stage_labels.get(stage, stage)
+            lines.append(f"  {label}: {m.team_home.name} {m.score_home}:{m.score_away} {m.team_away.name}")
+
+    lines.append("")
     place_keys = {1: 'place_1', 2: 'place_2', 3: 'place_3', 4: 'place_4'}
     for place_num, team_id in place_teams.items():
         team_obj = await session.get(Team, team_id)
@@ -2224,27 +2238,35 @@ async def gd_to_channel(call: CallbackQuery, session: AsyncSession, bot: Bot):
 
     lines.append(t('tournament_thanks', 'ru'))
 
-    try:
-        await bot.send_message(settings.CHANNEL_ID, "\n".join(lines))
-        await call.answer(t('channel_posted', 'ru'), show_alert=True)
-    except Exception as e:
-        logger.error(f"gd_to_channel error: {e}")
-        await call.answer(f"❌ Ошибка при публикации: {e}", show_alert=True)
+    post_text = "\n".join(lines)
+    # Отправляем как превью в текущий чат
+    await call.message.answer(
+        "📋 <b>Готовый пост (скопируй и опубликуй в канале):</b>\n\n" + post_text,
+        reply_markup=InlineKeyboardBuilder().row(
+            InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}")
+        ).as_markup()
+    )
 
 
 # ══════════════════════════════════════════════════════
-#  РАСПИСАНИЕ МАТЧЕЙ (I-042)
+#  РАСПИСАНИЕ МАТЧЕЙ (I-042) — сетка турнира
 # ══════════════════════════════════════════════════════
+
+_ST = {"scheduled": "⏳", "in_progress": "▶️", "finished": "✅"}
+
+
+def _st(match) -> str:
+    v = match.status.value if hasattr(match.status, "value") else str(match.status)
+    return _ST.get(v, "❓")
+
 
 @router.callback_query(F.data.startswith("gd_schedule:"))
 async def gd_schedule_view(call: CallbackQuery, session: AsyncSession):
-    """Показывает расписание матчей игрового дня и кнопки управления."""
+    """Сетка турнира: круги группового этапа + плей-офф."""
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
         return
     await call.answer()
-
-    from app.keyboards.game_day import game_day_action_kb
 
     game_day_id = int(call.data.split(":")[1])
     game_day = await session.get(GameDay, game_day_id)
@@ -2252,59 +2274,125 @@ async def gd_schedule_view(call: CallbackQuery, session: AsyncSession):
         await call.message.edit_text("❌ Игровой день не найден.")
         return
 
-    # Загружаем матчи с match_order > 0 (т.е. из расписания)
-    result = await session.execute(
+    # Команды игрового дня
+    teams_res = await session.execute(select(Team).where(Team.game_day_id == game_day_id))
+    teams = teams_res.scalars().all()
+    n = len(teams)
+    pairs_per_circle = n * (n - 1) // 2 if n >= 2 else 1
+
+    # Групповые матчи из расписания (match_order > 0)
+    grp_res = await session.execute(
         select(Match)
         .options(selectinload(Match.team_home), selectinload(Match.team_away))
-        .where(Match.game_day_id == game_day_id, Match.match_order > 0)
+        .where(
+            Match.game_day_id == game_day_id,
+            Match.match_order > 0,
+            Match.match_stage == "group",
+        )
         .order_by(Match.match_order)
     )
-    scheduled = result.scalars().all()
+    group_matches = grp_res.scalars().all()
 
-    status_emoji = {
-        "scheduled": "⏳",
-        "in_progress": "▶️",
-        "finished": "✅",
-    }
-
-    lines = [t('schedule_title', 'ru', game_name=game_day.display_name)]
-    if not scheduled:
-        lines.append(t('schedule_empty', 'ru'))
-    else:
-        for m in scheduled:
-            st = status_emoji.get(m.status.value if hasattr(m.status, 'value') else m.status, "❓")
-            lines.append(
-                f"{m.match_order}. {st} {m.team_home.color_emoji} <b>{m.team_home.name}</b>"
-                f" vs {m.team_away.color_emoji} <b>{m.team_away.name}</b>"
-                + (f" — {m.score_home}:{m.score_away}" if m.status != MatchStatus.SCHEDULED else "")
-            )
-
-    # Проверяем наличие команд
-    teams_res = await session.execute(
-        select(Team).where(Team.game_day_id == game_day_id)
+    # Плей-офф матчи (semifinal, third_place, final)
+    playoff_res = await session.execute(
+        select(Match)
+        .options(selectinload(Match.team_home), selectinload(Match.team_away))
+        .where(
+            Match.game_day_id == game_day_id,
+            Match.match_stage.in_(["semifinal", "third_place", "final"]),
+        )
+        .order_by(Match.id)
     )
-    teams = teams_res.scalars().all()
+    playoff_matches = playoff_res.scalars().all()
 
+    lines = [f"📅 <b>Сетка турнира — {game_day.display_name}</b>"]
+
+    if not group_matches and not playoff_matches:
+        lines.append("\n📋 Расписание ещё не создано.")
+        if n < 2:
+            lines.append("⚠️ Сначала создай команды через «🎲 Создать команды».")
+    else:
+        # ── Групповой этап (разбивка по кругам) ──
+        from collections import defaultdict
+        circles: dict = defaultdict(list)
+        for m in group_matches:
+            circle_num = (m.match_order - 1) // pairs_per_circle + 1
+            circles[circle_num].append(m)
+
+        for circle_num in sorted(circles.keys()):
+            ms = circles[circle_num]
+            lines.append(f"\n🔵 <b>Круг {circle_num} ({len(ms)} матчей):</b>")
+            parts = []
+            for m in ms:
+                icon = _st(m)
+                score = f" {m.score_home}:{m.score_away}" if m.status == MatchStatus.FINISHED else ""
+                parts.append(f"{icon} {m.team_home.name}–{m.team_away.name}{score}")
+            lines.append(" · ".join(parts))
+
+        # ── Плей-офф ──
+        if playoff_matches:
+            lines.append("\n🏆 <b>Плей-офф:</b>")
+            semi_n = 0
+            stage_labels = {
+                "semifinal": None,       # заполняется динамически
+                "third_place": "Матч за 3-е",
+                "final": "Финал",
+            }
+            for m in playoff_matches:
+                stage = m.match_stage or "group"
+                icon = _st(m)
+                if stage == "semifinal":
+                    semi_n += 1
+                    label = f"Полуфинал {semi_n}"
+                else:
+                    label = stage_labels.get(stage, stage)
+                score = f" {m.score_home}:{m.score_away}" if m.status == MatchStatus.FINISHED else ""
+                lines.append(f"  {icon} <b>{label}</b>: {m.team_home.name}–{m.team_away.name}{score}")
+        else:
+            # Плей-офф ещё не создан — показываем как пустые слоты
+            group_all_done = group_matches and all(
+                m.status == MatchStatus.FINISHED for m in group_matches
+            )
+            if group_matches:
+                lines.append("\n🏆 <b>Плей-офф:</b>")
+                if group_all_done:
+                    lines.append("  ⏳ Полуфинал 1 (1-е vs 4-е)")
+                    lines.append("  ⏳ Полуфинал 2 (2-е vs 3-е)")
+                    lines.append("  ⏳ Матч за 3-е · ⏳ Финал")
+                else:
+                    lines.append("  <i>Откроется после завершения группового этапа</i>")
+
+    # ── Кнопки управления ──
     builder = InlineKeyboardBuilder()
-    if len(teams) >= 2:
+
+    group_all_done = bool(group_matches) and all(
+        m.status == MatchStatus.FINISHED for m in group_matches
+    )
+    semis = [m for m in playoff_matches if m.match_stage == "semifinal"]
+    semis_done = bool(semis) and all(m.status == MatchStatus.FINISHED for m in semis)
+    has_finals = any(m.match_stage in ("third_place", "final") for m in playoff_matches)
+
+    if not group_matches and n >= 2:
         builder.row(InlineKeyboardButton(
-            text="➕ Добавить матч в расписание",
+            text="🎲 Авто-расписание",
+            callback_data=f"gd_sched_auto:{game_day_id}"
+        ))
+        builder.row(InlineKeyboardButton(
+            text="➕ Добавить матч вручную",
             callback_data=f"gd_sched_add:{game_day_id}"
         ))
-        # Авто-сгенерировать расписание (round-robin)
-        if not scheduled and len(teams) >= 2:
-            builder.row(InlineKeyboardButton(
-                text="🎲 Авто-расписание (round-robin)",
-                callback_data=f"gd_sched_auto:{game_day_id}"
-            ))
-    else:
-        lines.append("\n⚠️ Сначала создай команды через «🎲 Создать команды».")
+    elif group_all_done and not playoff_matches:
+        builder.row(InlineKeyboardButton(
+            text="🏆 Сформировать плей-офф",
+            callback_data=f"gd_sched_playoff:{game_day_id}"
+        ))
+    elif semis_done and not has_finals:
+        builder.row(InlineKeyboardButton(
+            text="🏆 Создать финалы (3-е место + Финал)",
+            callback_data=f"gd_sched_finals:{game_day_id}"
+        ))
 
-    builder.row(InlineKeyboardButton(
-        text="🔙 Назад",
-        callback_data=f"gd_players:{game_day_id}"
-    ))
-
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
     await call.message.edit_text("\n".join(lines), reply_markup=builder.as_markup())
 
 
@@ -2423,49 +2511,259 @@ async def gd_sched_pick_team2(call: CallbackQuery, state: FSMContext, session: A
 
 
 @router.callback_query(F.data.startswith("gd_sched_auto:"))
-async def gd_sched_auto(call: CallbackQuery, session: AsyncSession):
-    """Авто-генерация расписания round-robin из всех команд."""
+async def gd_sched_auto_ask(call: CallbackQuery, session: AsyncSession):
+    """Выбор количества кругов для авто-расписания."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+
+    teams_res = await session.execute(select(Team).where(Team.game_day_id == game_day_id))
+    teams = teams_res.scalars().all()
+    n = len(teams)
+
+    if n < 2:
+        await call.answer("⚠️ Нужно минимум 2 команды.", show_alert=True)
+        return
+
+    pairs = n * (n - 1) // 2
+    names = " · ".join(t.name for t in teams)
+
+    def circles_label(k):
+        w = "круг" if k == 1 else "круга" if k in (2, 3) else "кругов"
+        return f"{k} {w} ({k * pairs} матчей)"
+
+    builder = InlineKeyboardBuilder()
+    for k in (1, 2, 3):
+        builder.row(InlineKeyboardButton(
+            text=circles_label(k),
+            callback_data=f"gd_sched_circles:{game_day_id}:{k}"
+        ))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"gd_schedule:{game_day_id}"))
+
+    await call.message.edit_text(
+        f"🎲 <b>Авто-расписание</b>\n\n"
+        f"Команды ({n}): {names}\n"
+        f"Пар за круг: <b>{pairs}</b>\n\n"
+        "Сколько кругов сыграть?",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("gd_sched_circles:"))
+async def gd_sched_circles(call: CallbackQuery, session: AsyncSession):
+    """Генерирует N кругов round-robin."""
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
         return
     await call.answer("⏳ Генерирую расписание...")
 
-    game_day_id = int(call.data.split(":")[1])
-    game_day = await session.get(GameDay, game_day_id)
+    parts = call.data.split(":")
+    game_day_id = int(parts[1])
+    circles = int(parts[2])
 
-    teams_res = await session.execute(
-        select(Team).where(Team.game_day_id == game_day_id)
-    )
+    game_day = await session.get(GameDay, game_day_id)
+    teams_res = await session.execute(select(Team).where(Team.game_day_id == game_day_id))
     teams = teams_res.scalars().all()
 
     if len(teams) < 2:
         await call.answer("⚠️ Нужно минимум 2 команды.", show_alert=True)
         return
 
-    # Round-robin: каждая команда играет с каждой по одному разу
+    # Составляем все пары
+    pairs = [(teams[i], teams[j]) for i in range(len(teams)) for j in range(i + 1, len(teams))]
+
     order = 0
-    for i in range(len(teams)):
-        for j in range(i + 1, len(teams)):
+    for _ in range(circles):
+        for home_team, away_team in pairs:
             order += 1
-            new_match = Match(
+            session.add(Match(
                 game_day_id=game_day_id,
-                team_home_id=teams[i].id,
-                team_away_id=teams[j].id,
+                team_home_id=home_team.id,
+                team_away_id=away_team.id,
                 match_order=order,
                 status=MatchStatus.SCHEDULED,
                 match_format=game_day.match_format if game_day else "time",
                 duration_min=game_day.match_duration_min if game_day else 20,
                 goals_to_win=game_day.goals_to_win if game_day else 3,
                 match_stage="group",
-            )
-            session.add(new_match)
+            ))
 
     await session.commit()
 
     await call.message.edit_text(
-        f"✅ Создано <b>{order}</b> матчей по системе round-robin!\n\n"
-        "Судья увидит их в своей панели и сможет запускать по порядку.",
+        f"✅ Создано <b>{order}</b> матчей ({circles} {'круг' if circles==1 else 'круга' if circles in (2,3) else 'кругов'} × {len(pairs)} пар).\n\n"
+        "После завершения всех матчей появится кнопка «Сформировать плей-офф».",
         reply_markup=InlineKeyboardBuilder().row(
-            InlineKeyboardButton(text="📅 Посмотреть расписание", callback_data=f"gd_schedule:{game_day_id}")
+            InlineKeyboardButton(text="📅 Сетка турнира", callback_data=f"gd_schedule:{game_day_id}")
+        ).as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("gd_sched_playoff:"))
+async def gd_sched_playoff(call: CallbackQuery, session: AsyncSession):
+    """Создаёт полуфиналы на основе таблицы группового этапа."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("⏳ Считаю таблицу...")
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+
+    # Загружаем все завершённые групповые матчи
+    grp_res = await session.execute(
+        select(Match)
+        .where(
+            Match.game_day_id == game_day_id,
+            Match.match_stage == "group",
+            Match.status == MatchStatus.FINISHED,
+        )
+    )
+    group_matches = grp_res.scalars().all()
+
+    # Считаем таблицу
+    stats: dict[int, dict] = {}
+    for m in group_matches:
+        for team_id, gf, ga in [
+            (m.team_home_id, m.score_home, m.score_away),
+            (m.team_away_id, m.score_away, m.score_home),
+        ]:
+            if team_id not in stats:
+                stats[team_id] = {"W": 0, "D": 0, "L": 0, "GF": 0, "GA": 0}
+            s = stats[team_id]
+            s["GF"] += gf
+            s["GA"] += ga
+            if gf > ga:
+                s["W"] += 1
+            elif gf == ga:
+                s["D"] += 1
+            else:
+                s["L"] += 1
+
+    for s in stats.values():
+        s["Pts"] = s["W"] * 3 + s["D"]
+
+    ranked = sorted(
+        stats.keys(),
+        key=lambda tid: (-stats[tid]["Pts"], -(stats[tid]["GF"] - stats[tid]["GA"]), -stats[tid]["GF"])
+    )
+
+    if len(ranked) < 2:
+        await call.answer("⚠️ Недостаточно данных для плей-офф.", show_alert=True)
+        return
+
+    fmt = game_day.match_format if game_day else "time"
+    dur = game_day.match_duration_min if game_day else 20
+    gtw = game_day.goals_to_win if game_day else 3
+
+    if len(ranked) >= 4:
+        # 1-е vs 4-е, 2-е vs 3-е
+        session.add(Match(
+            game_day_id=game_day_id,
+            team_home_id=ranked[0], team_away_id=ranked[3],
+            match_order=0, match_stage="semifinal",
+            status=MatchStatus.SCHEDULED,
+            match_format=fmt, duration_min=dur, goals_to_win=gtw,
+        ))
+        session.add(Match(
+            game_day_id=game_day_id,
+            team_home_id=ranked[1], team_away_id=ranked[2],
+            match_order=0, match_stage="semifinal",
+            status=MatchStatus.SCHEDULED,
+            match_format=fmt, duration_min=dur, goals_to_win=gtw,
+        ))
+        msg = "✅ Созданы <b>Полуфинал 1</b> (1-е vs 4-е) и <b>Полуфинал 2</b> (2-е vs 3-е)."
+    elif len(ranked) == 3:
+        # 1-е получает bye, 2-е vs 3-е → финал: 1-е vs победитель
+        session.add(Match(
+            game_day_id=game_day_id,
+            team_home_id=ranked[1], team_away_id=ranked[2],
+            match_order=0, match_stage="semifinal",
+            status=MatchStatus.SCHEDULED,
+            match_format=fmt, duration_min=dur, goals_to_win=gtw,
+        ))
+        msg = "✅ Создан <b>Полуфинал</b> (2-е vs 3-е). Победитель сыграет с 1-м в финале."
+    else:
+        # 2 команды — сразу финал
+        session.add(Match(
+            game_day_id=game_day_id,
+            team_home_id=ranked[0], team_away_id=ranked[1],
+            match_order=0, match_stage="final",
+            status=MatchStatus.SCHEDULED,
+            match_format=fmt, duration_min=dur, goals_to_win=gtw,
+        ))
+        msg = "✅ Создан <b>Финал</b> (1-е vs 2-е)."
+
+    await session.commit()
+    await call.message.edit_text(
+        msg + "\n\nСудья найдёт матчи в своей панели.",
+        reply_markup=InlineKeyboardBuilder().row(
+            InlineKeyboardButton(text="📅 Сетка турнира", callback_data=f"gd_schedule:{game_day_id}")
+        ).as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("gd_sched_finals:"))
+async def gd_sched_finals(call: CallbackQuery, session: AsyncSession):
+    """Создаёт матч за 3-е место и Финал по итогам полуфиналов."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("⏳ Формирую финальные матчи...")
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+
+    semis_res = await session.execute(
+        select(Match)
+        .where(
+            Match.game_day_id == game_day_id,
+            Match.match_stage == "semifinal",
+            Match.status == MatchStatus.FINISHED,
+        )
+        .order_by(Match.id)
+    )
+    semis = semis_res.scalars().all()
+
+    if len(semis) < 2:
+        await call.answer("⚠️ Нужно минимум 2 завершённых полуфинала.", show_alert=True)
+        return
+
+    def winner(m: Match) -> int:
+        return m.team_home_id if m.score_home >= m.score_away else m.team_away_id
+
+    def loser(m: Match) -> int:
+        return m.team_away_id if m.score_home >= m.score_away else m.team_home_id
+
+    fmt = game_day.match_format if game_day else "time"
+    dur = game_day.match_duration_min if game_day else 20
+    gtw = game_day.goals_to_win if game_day else 3
+
+    # Матч за 3-е: проигравшие полуфиналов
+    session.add(Match(
+        game_day_id=game_day_id,
+        team_home_id=loser(semis[0]), team_away_id=loser(semis[1]),
+        match_order=0, match_stage="third_place",
+        status=MatchStatus.SCHEDULED,
+        match_format=fmt, duration_min=dur, goals_to_win=gtw,
+    ))
+    # Финал: победители полуфиналов
+    session.add(Match(
+        game_day_id=game_day_id,
+        team_home_id=winner(semis[0]), team_away_id=winner(semis[1]),
+        match_order=0, match_stage="final",
+        status=MatchStatus.SCHEDULED,
+        match_format=fmt, duration_min=dur, goals_to_win=gtw,
+    ))
+    await session.commit()
+
+    await call.message.edit_text(
+        "✅ Созданы <b>Матч за 3-е место</b> и <b>Финал</b>.\n\n"
+        "Судья найдёт их в своей панели.",
+        reply_markup=InlineKeyboardBuilder().row(
+            InlineKeyboardButton(text="📅 Сетка турнира", callback_data=f"gd_schedule:{game_day_id}")
         ).as_markup()
     )
