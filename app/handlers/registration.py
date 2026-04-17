@@ -232,6 +232,12 @@ async def _finish_registration(message: Message, state: FSMContext,
     else:
         await message.answer(text, reply_markup=main_menu_kb())
 
+    # Language selection step — ask after registration
+    await message.answer(
+        t('choose_language', 'ru'),
+        reply_markup=language_kb('ru')
+    )
+
 
 # ══════════════════════════════════════════════════════
 #  РЕДАКТИРОВАНИЕ ПРОФИЛЯ
