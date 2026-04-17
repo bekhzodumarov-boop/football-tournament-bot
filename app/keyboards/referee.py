@@ -23,8 +23,15 @@ def referee_gd_kb(game_day_id: int, matches: list) -> InlineKeyboardMarkup:
             f"{match.score_home}:{match.score_away} "
             f"{match.team_away.name}"
         )
+        # Stage prefix for non-group matches
+        stage = getattr(match, "match_stage", "group") or "group"
+        stage_prefix = {
+            "semifinal": "🏆 ",
+            "third_place": "🥉 ",
+            "final": "🏆🏆 ",
+        }.get(stage, "")
         builder.row(InlineKeyboardButton(
-            text=text,
+            text=stage_prefix + text,
             callback_data=f"ref_match:{match.id}"
         ))
     builder.row(InlineKeyboardButton(
@@ -52,8 +59,8 @@ def referee_match_kb(match_id: int, is_started: bool, is_finished: bool) -> Inli
         # Постфактум: добавить события после финального свистка
         builder.row(
             InlineKeyboardButton(text="🥅 +Гол", callback_data=f"ref_goal:{match_id}"),
-            InlineKeyboardButton(text="🟡 +ЖК", callback_data=f"ref_yellow:{match_id}"),
-            InlineKeyboardButton(text="🔴 +КК", callback_data=f"ref_red:{match_id}"),
+            InlineKeyboardButton(text="🟨 +ЖК", callback_data=f"ref_yellow:{match_id}"),
+            InlineKeyboardButton(text="🟥 +КК", callback_data=f"ref_red:{match_id}"),
         )
     elif not is_started:
         builder.row(InlineKeyboardButton(
@@ -69,8 +76,8 @@ def referee_match_kb(match_id: int, is_started: bool, is_finished: bool) -> Inli
     if not is_finished:
         builder.row(
             InlineKeyboardButton(text="🥅 Гол", callback_data=f"ref_goal:{match_id}"),
-            InlineKeyboardButton(text="🟡 ЖК", callback_data=f"ref_yellow:{match_id}"),
-            InlineKeyboardButton(text="🔴 КК", callback_data=f"ref_red:{match_id}"),
+            InlineKeyboardButton(text="🟨 ЖК", callback_data=f"ref_yellow:{match_id}"),
+            InlineKeyboardButton(text="🟥 КК", callback_data=f"ref_red:{match_id}"),
         )
         if is_started:
             builder.row(InlineKeyboardButton(
@@ -214,5 +221,19 @@ def pick_format_kb() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="⏱ По времени", callback_data="ref_fmt:time"),
         InlineKeyboardButton(text="🥅 До N голов", callback_data="ref_fmt:goals"),
+    )
+    return builder.as_markup()
+
+
+def pick_stage_kb() -> InlineKeyboardMarkup:
+    """Выбор стадии матча (групповой / плей-офф)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📋 Групповой этап", callback_data="ref_stage:group"),
+        InlineKeyboardButton(text="🏆 Полуфинал", callback_data="ref_stage:semifinal"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🥉 Матч за 3 место", callback_data="ref_stage:third_place"),
+        InlineKeyboardButton(text="🏆🏆 Финал", callback_data="ref_stage:final"),
     )
     return builder.as_markup()

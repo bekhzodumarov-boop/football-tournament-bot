@@ -67,6 +67,20 @@ class CardType(str, PyEnum):
     RED = "red"
 
 
+class MatchStage(str, PyEnum):
+    GROUP = "group"
+    SEMIFINAL = "semifinal"
+    THIRD_PLACE = "third_place"
+    FINAL = "final"
+
+MATCH_STAGE_LABELS = {
+    MatchStage.GROUP:       "📋 Групповой этап",
+    MatchStage.SEMIFINAL:   "🏆 Полуфинал",
+    MatchStage.THIRD_PLACE: "🥉 Матч за 3 место",
+    MatchStage.FINAL:       "🏆 Финал",
+}
+
+
 def _gen_invite_code() -> str:
     """Генерирует случайный 8-символьный инвайт-код (A-Z0-9)."""
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
@@ -224,6 +238,7 @@ class Match(Base):
     goals_to_win: Mapped[int] = mapped_column(Integer, default=3)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    match_stage: Mapped[Optional[str]] = mapped_column(String(20), default="group", nullable=True)
 
     game_day: Mapped["GameDay"] = relationship(back_populates="matches")
     team_home: Mapped["Team"] = relationship(foreign_keys=[team_home_id])

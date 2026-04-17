@@ -34,12 +34,13 @@ from app.database.models import (
     Goal, GoalType,
     Card, CardType,
     Player,
+    MatchStage, MATCH_STAGE_LABELS,
 )
 from app.keyboards.referee import (
     referee_gamedays_kb, referee_gd_kb, referee_match_kb,
     select_team_kb, select_player_kb, confirm_finish_kb,
     team_players_select_kb, teams_list_kb, pick_team_kb,
-    sub_player_out_kb, sub_player_in_kb, pick_format_kb,
+    sub_player_out_kb, sub_player_in_kb, pick_format_kb, pick_stage_kb,
 )
 from app.scheduler import scheduler
 
@@ -63,6 +64,7 @@ class RefereeMatchFSM(StatesGroup):
     waiting_pick_team1 = State()
     waiting_pick_team2 = State()
     # Общие шаги (оба потока)
+    waiting_stage = State()        # выбор стадии: группа / полуфинал / ...
     waiting_format = State()       # выбор формата: время / голы
     waiting_duration = State()     # минуты (формат TIME)
     waiting_goals_count = State()  # кол-во голов (формат GOALS)
@@ -179,7 +181,7 @@ def _match_panel_text(match: Match) -> str:
         for g in sorted(match.goals, key=lambda x: x.scored_at)
     ]
     card_lines = [
-        f"  {'🟡' if c.card_type == CardType.YELLOW else '🔴'} {c.player.name}"
+        f"  {'🟨' if c.card_type == CardType.YELLOW else '🟥'} {c.player.name}"
         f" [{home if c.team_id == match.team_home_id else away}]"
         for c in sorted(match.cards, key=lambda x: x.issued_at)
     ]
@@ -476,13 +478,13 @@ async def ref_team_players_done(call: CallbackQuery, state: FSMContext,
         )
     else:
         await state.update_data(team2_player_ids=selected, selected_player_ids=[])
-        await state.set_state(RefereeMatchFSM.waiting_format)
+        await state.set_state(RefereeMatchFSM.waiting_stage)
 
         team2_name = data.get("team2_name", "Команда 2")
         await call.message.edit_text(
             f"✅ <b>{team2_name}</b>: {len(selected)} игроков выбрано\n\n"
-            f"Шаг 5 из 5\n\nВыбери формат матча:",
-            reply_markup=pick_format_kb()
+            f"Шаг 5 из 6\n\nВыбери <b>стадию матча</b>:",
+            reply_markup=pick_stage_kb()
         )
 
 
@@ -541,6 +543,7 @@ async def _create_match_from_state(message: Message, state: FSMContext,
     match_fmt = MatchFormat.GOALS if fmt_str == "goals" else MatchFormat.TIME
     duration = data.get("duration_min", 20)
     goals_to_win = data.get("goals_to_win", 3)
+    match_stage_val = data.get("match_stage_val", "group")
 
     if flow == "existing":
         team1_id = data["existing_team1_id"]
@@ -556,6 +559,7 @@ async def _create_match_from_state(message: Message, state: FSMContext,
             duration_min=duration,
             goals_to_win=goals_to_win,
             status=MatchStatus.SCHEDULED,
+            match_stage=match_stage_val,
         )
         session.add(match)
         await session.commit()
@@ -596,6 +600,7 @@ async def _create_match_from_state(message: Message, state: FSMContext,
             duration_min=duration,
             goals_to_win=goals_to_win,
             status=MatchStatus.SCHEDULED,
+            match_stage=match_stage_val,
         )
         session.add(match)
         await session.commit()
@@ -846,7 +851,7 @@ async def ref_yellow_select_team(call: CallbackQuery, session: AsyncSession,
         return
 
     await call.message.edit_text(
-        "🟡 <b>Жёлтая карточка</b>\n\nИз какой команды?",
+        "🟨 <b>Жёлтая карточка</b>\n\nИз какой команды?",
         reply_markup=select_team_kb(
             match_id, "ref_yellow_team",
             match.team_home_id, match.team_home.name,
@@ -875,7 +880,7 @@ async def ref_yellow_select_player(call: CallbackQuery, session: AsyncSession,
         players = await _get_attendees(session, match.game_day_id)
 
     await call.message.edit_text(
-        f"🟡 <b>Жёлтая карточка — {team_name}</b>\n\nКому?",
+        f"🟨 <b>Жёлтая карточка — {team_name}</b>\n\nКому?",
         reply_markup=select_player_kb(match_id, "ref_yellow_player", team_id, players)
     )
 
@@ -902,7 +907,7 @@ async def ref_yellow_record(call: CallbackQuery, session: AsyncSession,
     await session.commit()
     match = await _load_match(session, match_id)
 
-    await call.answer(f"🟡 ЖК: {carded.name}", show_alert=True)
+    await call.answer(f"🟨 ЖК: {carded.name}", show_alert=True)
     await call.message.edit_text(
         _match_panel_text(match),
         reply_markup=referee_match_kb(
@@ -931,7 +936,7 @@ async def ref_red_select_team(call: CallbackQuery, session: AsyncSession,
         return
 
     await call.message.edit_text(
-        "🔴 <b>Красная карточка</b>\n\nИз какой команды?",
+        "🟥 <b>Красная карточка</b>\n\nИз какой команды?",
         reply_markup=select_team_kb(
             match_id, "ref_red_team",
             match.team_home_id, match.team_home.name,
@@ -960,7 +965,7 @@ async def ref_red_select_player(call: CallbackQuery, session: AsyncSession,
         players = await _get_attendees(session, match.game_day_id)
 
     await call.message.edit_text(
-        f"🔴 <b>Красная карточка — {team_name}</b>\n\nКому?",
+        f"🟥 <b>Красная карточка — {team_name}</b>\n\nКому?",
         reply_markup=select_player_kb(match_id, "ref_red_player", team_id, players)
     )
 
@@ -987,7 +992,24 @@ async def ref_red_record(call: CallbackQuery, session: AsyncSession,
     await session.commit()
     match = await _load_match(session, match_id)
 
-    await call.answer(f"🔴 КК: {carded.name}", show_alert=True)
+    # Check if player already had a red in an earlier match of this game_day
+    prev_red_result = await session.execute(
+        select(Card)
+        .join(Match, Match.id == Card.match_id)
+        .where(
+            Match.game_day_id == match.game_day_id,
+            Card.player_id == player_id,
+            Card.card_type == CardType.RED,
+            Match.id != match_id,
+        )
+        .limit(1)
+    )
+    already_banned = prev_red_result.scalar_one_or_none() is not None
+    if already_banned:
+        disq_msg = f"🟥 КК: {carded.name}\n⛔ Уже дисквалифицирован — пропускает этот и следующий матч!"
+    else:
+        disq_msg = f"🟥 КК: {carded.name} — дисквалификация на этот и следующий матч!"
+    await call.answer(disq_msg, show_alert=True)
     await call.message.edit_text(
         _match_panel_text(match),
         reply_markup=referee_match_kb(
@@ -1068,7 +1090,7 @@ async def ref_finish_match(call: CallbackQuery, session: AsyncSession,
     if match.cards:
         result_text += "\n\n<b>Карточки:</b>"
         for c in sorted(match.cards, key=lambda x: x.issued_at):
-            emoji = "🟡" if c.card_type == CardType.YELLOW else "🔴"
+            emoji = "🟨" if c.card_type == CardType.YELLOW else "🟥"
             result_text += f"\n  {emoji} {c.player.name}"
 
     await call.message.edit_text(
@@ -1146,8 +1168,8 @@ async def ref_timer_status(call: CallbackQuery, session: AsyncSession,
         RefereeMatchFSM.waiting_team1, RefereeMatchFSM.waiting_team1_players,
         RefereeMatchFSM.waiting_team2, RefereeMatchFSM.waiting_team2_players,
         RefereeMatchFSM.waiting_pick_team1, RefereeMatchFSM.waiting_pick_team2,
-        RefereeMatchFSM.waiting_format, RefereeMatchFSM.waiting_duration,
-        RefereeMatchFSM.waiting_goals_count,
+        RefereeMatchFSM.waiting_stage, RefereeMatchFSM.waiting_format,
+        RefereeMatchFSM.waiting_duration, RefereeMatchFSM.waiting_goals_count,
         RefereeTeamSetupFSM.waiting_team_name, RefereeTeamSetupFSM.waiting_team_players,
     )
 )
@@ -1156,6 +1178,31 @@ async def referee_fsm_cancel(message: Message, state: FSMContext):
     await message.answer(
         "❌ Действие отменено.\n\n"
         "📋 /referee — вернуться в панель судьи"
+    )
+
+
+# ─────────────────────────────────────────────
+#  Выбор стадии матча
+# ─────────────────────────────────────────────
+
+@router.callback_query(
+    F.data.startswith("ref_stage:"),
+    StateFilter(RefereeMatchFSM.waiting_stage)
+)
+async def ref_pick_stage(call: CallbackQuery, state: FSMContext, player: Player | None):
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    stage_str = call.data.split(":")[1]  # group / semifinal / third_place / final
+    await state.update_data(match_stage_val=stage_str)
+    await state.set_state(RefereeMatchFSM.waiting_format)
+
+    stage_label = MATCH_STAGE_LABELS.get(MatchStage(stage_str), stage_str)
+    await call.message.edit_text(
+        f"✅ Стадия: <b>{stage_label}</b>\n\nВыбери формат матча:",
+        reply_markup=pick_format_kb()
     )
 
 
@@ -1258,7 +1305,7 @@ async def ref_pick_team2(call: CallbackQuery, state: FSMContext,
     team2_id = int(team2_id_str)
 
     await state.update_data(existing_team2_id=team2_id)
-    await state.set_state(RefereeMatchFSM.waiting_format)
+    await state.set_state(RefereeMatchFSM.waiting_stage)
 
     data = await state.get_data()
     team1 = await session.get(Team, data["existing_team1_id"])
@@ -1266,8 +1313,8 @@ async def ref_pick_team2(call: CallbackQuery, state: FSMContext,
 
     await call.message.edit_text(
         f"✅ {team1.color_emoji} {team1.name} vs {team2.color_emoji} {team2.name}\n\n"
-        "Шаг 3 из 3\n\nВыбери формат матча:",
-        reply_markup=pick_format_kb()
+        "Шаг 3 из 4\n\nВыбери <b>стадию матча</b>:",
+        reply_markup=pick_stage_kb()
     )
 
 
@@ -1469,57 +1516,19 @@ async def ref_standings(call: CallbackQuery, player: Player | None,
     await call.answer()
 
     game_day_id = int(call.data.split(":")[1])
-    standings = await _compute_standings(session, game_day_id)
 
-    if not standings:
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        from aiogram.utils.keyboard import InlineKeyboardBuilder
-        builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(
-            text="🔙 Назад",
-            callback_data=f"ref_gd:{game_day_id}"
-        ))
-        await call.message.edit_text(
-            "📊 <b>Таблица турнира</b>\n\nЗавершённых матчей ещё нет.",
-            reply_markup=builder.as_markup()
-        )
-        return
-
-    lines = ["📊 <b>Таблица турнира</b>\n"]
-    lines.append("<code>№  Команда          И  В  Н  П  ГЗ ГП  О</code>")
-    lines.append("<code>" + "─" * 42 + "</code>")
-    for i, s in enumerate(standings, 1):
-        name = s["name"][:14].ljust(14)
-        row = (
-            f"{i:<3}{name} "
-            f"{s['GP']:<3}{s['W']:<3}{s['D']:<3}{s['L']:<3}"
-            f"{s['GF']:<3}{s['GA']:<3}{s['Pts']}"
-        )
-        lines.append(f"<code>{row}</code>")
-
-    # Ближайшие и завершённые матчи
+    # Load ALL matches with goals/cards
     all_matches_result = await session.execute(
         select(Match)
-        .options(selectinload(Match.team_home), selectinload(Match.team_away))
+        .options(
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        )
         .where(Match.game_day_id == game_day_id)
         .order_by(Match.id)
     )
     all_matches = all_matches_result.scalars().all()
-
-    finished = [m for m in all_matches if m.status == MatchStatus.FINISHED]
-    upcoming = [m for m in all_matches if m.status == MatchStatus.SCHEDULED]
-
-    if finished:
-        lines.append("\n<b>Сыгранные матчи:</b>")
-        for m in finished[-5:]:
-            lines.append(
-                f"✅ {m.team_home.name} <b>{m.score_home}:{m.score_away}</b> {m.team_away.name}"
-            )
-
-    if upcoming:
-        lines.append("\n<b>Предстоящие матчи:</b>")
-        for m in upcoming[:5]:
-            lines.append(f"⏳ {m.team_home.name} vs {m.team_away.name}")
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     from aiogram.types import InlineKeyboardButton
@@ -1528,6 +1537,70 @@ async def ref_standings(call: CallbackQuery, player: Player | None,
         text="🔙 К игровому дню",
         callback_data=f"ref_gd:{game_day_id}"
     ))
+
+    if not all_matches:
+        await call.message.edit_text(
+            "📊 <b>Таблица турнира</b>\n\nМатчей ещё нет.",
+            reply_markup=builder.as_markup()
+        )
+        return
+
+    # ── Standings (group stage only) ──
+    standings = await _compute_standings(session, game_day_id)
+    lines = ["📊 <b>Таблица турнира</b>\n"]
+    if standings:
+        lines.append("<code>№  Команда          И  В  Н  П  ГЗ ГП  О</code>")
+        lines.append("<code>" + "─" * 42 + "</code>")
+        for i, s in enumerate(standings, 1):
+            name = s["name"][:14].ljust(14)
+            row = (
+                f"{i:<3}{name} "
+                f"{s['GP']:<3}{s['W']:<3}{s['D']:<3}{s['L']:<3}"
+                f"{s['GF']:<3}{s['GA']:<3}{s['Pts']}"
+            )
+            lines.append(f"<code>{row}</code>")
+
+    # ── All matches grouped by stage ──
+    stage_order = ["group", "semifinal", "third_place", "final"]
+    stage_buckets: dict[str, list] = {s: [] for s in stage_order}
+    for m in all_matches:
+        stage_key = m.match_stage or "group"
+        if stage_key not in stage_buckets:
+            stage_buckets[stage_key] = []
+        stage_buckets[stage_key].append(m)
+
+    for stage_key in stage_order:
+        bucket = stage_buckets.get(stage_key, [])
+        if not bucket:
+            continue
+        try:
+            label = MATCH_STAGE_LABELS[MatchStage(stage_key)]
+        except (ValueError, KeyError):
+            label = stage_key
+        lines.append(f"\n<b>{label}:</b>")
+        for m in bucket:
+            status_icon = "✅" if m.status == MatchStatus.FINISHED else (
+                "▶️" if m.status == MatchStatus.IN_PROGRESS else "⏳"
+            )
+            lines.append(
+                f"{status_icon} {m.team_home.name} "
+                f"<b>{m.score_home}:{m.score_away}</b> "
+                f"{m.team_away.name}"
+            )
+
+    # ── Top scorers (бомбардиры) ──
+    from collections import Counter
+    goal_counts: Counter = Counter()
+    for m in all_matches:
+        for g in m.goals:
+            if g.goal_type != GoalType.OWN_GOAL and g.player:
+                goal_counts[g.player.name] += 1
+
+    if goal_counts:
+        lines.append("\n⚽ <b>Бомбардиры:</b>")
+        for i, (name, cnt) in enumerate(goal_counts.most_common(5), 1):
+            suffix = "гол" if cnt == 1 else ("гола" if cnt <= 4 else "голов")
+            lines.append(f"  {i}. {name} — {cnt} {suffix}")
 
     await call.message.edit_text("\n".join(lines), reply_markup=builder.as_markup())
 

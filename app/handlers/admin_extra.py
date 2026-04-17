@@ -1725,3 +1725,281 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
 
     # Показать сводку Админу (новым сообщением — надёжнее edit_text)
     await call.message.answer(full_summary, reply_markup=game_day_action_kb(game_day_id))
+
+
+# ══════════════════════════════════════════════════════
+#  ИТОГИ ТУРНИРА
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("gd_tournament_results:"))
+async def gd_tournament_results(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    from collections import Counter
+    from app.database.models import (
+        Match, MatchStatus, Goal, GoalType, Card, CardType,
+        Team, TeamPlayer, RatingRound, RatingVote,
+    )
+    from sqlalchemy.orm import selectinload
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        await call.message.edit_text("❌ Игровой день не найден.")
+        return
+
+    # Load all finished matches with goals
+    matches_res = await session.execute(
+        select(Match)
+        .options(
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        )
+        .where(Match.game_day_id == game_day_id, Match.status == MatchStatus.FINISHED)
+        .order_by(Match.id)
+    )
+    finished_matches = matches_res.scalars().all()
+
+    if not finished_matches:
+        await call.answer("⚠️ Нет завершённых матчей.", show_alert=True)
+        return
+
+    # ── Determine places from FINAL and THIRD_PLACE matches ──
+    places: dict[int, str] = {}  # team_id → place label
+
+    final_match = next(
+        (m for m in finished_matches if (m.match_stage or "group") == "final"), None
+    )
+    third_match = next(
+        (m for m in finished_matches if (m.match_stage or "group") == "third_place"), None
+    )
+
+    if final_match:
+        if final_match.score_home >= final_match.score_away:
+            places[final_match.team_home_id] = "🥇 1-е место"
+            places[final_match.team_away_id] = "🥈 2-е место"
+        else:
+            places[final_match.team_away_id] = "🥇 1-е место"
+            places[final_match.team_home_id] = "🥈 2-е место"
+
+    if third_match:
+        if third_match.score_home >= third_match.score_away:
+            places[third_match.team_home_id] = "🥉 3-е место"
+            places[third_match.team_away_id] = "❤️ Приз зрительских симпатий (4-е место)"
+        else:
+            places[third_match.team_away_id] = "🥉 3-е место"
+            places[third_match.team_home_id] = "❤️ Приз зрительских симпатий (4-е место)"
+
+    # ── Top scorer ──
+    goal_counts: Counter = Counter()
+    for m in finished_matches:
+        for g in m.goals:
+            if g.goal_type != GoalType.OWN_GOAL and g.player:
+                goal_counts[g.player.name] += 1
+
+    # ── Best player from rating votes (last round for this game_day) ──
+    best_player_name: str | None = None
+    rating_res = await session.execute(
+        select(RatingRound)
+        .options(selectinload(RatingRound.votes))
+        .where(
+            RatingRound.game_day_id == game_day_id,
+            RatingRound.status == "finished",
+        )
+        .order_by(RatingRound.id.desc())
+        .limit(1)
+    )
+    last_round = rating_res.scalar_one_or_none()
+    if last_round and last_round.votes:
+        vote_totals: Counter = Counter()
+        for v in last_round.votes:
+            vote_totals[v.nominee_id] += v.score
+        best_id = vote_totals.most_common(1)[0][0]
+        bp = await session.get(Player, best_id)
+        if bp:
+            best_player_name = bp.name
+
+    # ── Build result text ──
+    lines = [f"🏆 <b>Итоги турнира — {game_day.display_name}</b>\n"]
+
+    # Places
+    if places:
+        # Sort by place order
+        order = ["🥇 1-е место", "🥈 2-е место", "🥉 3-е место",
+                 "❤️ Приз зрительских симпатий (4-е место)"]
+        for label in order:
+            team_id = next((tid for tid, lbl in places.items() if lbl == label), None)
+            if team_id:
+                team = await session.get(Team, team_id)
+                if team:
+                    lines.append(f"{label}: <b>{team.color_emoji} {team.name}</b>")
+    else:
+        lines.append("⚠️ Финал и матч за 3 место не найдены.")
+        lines.append("Назначь матчи с нужными стадиями в панели судьи.")
+
+    # Top scorer
+    if goal_counts:
+        top_name, top_cnt = goal_counts.most_common(1)[0]
+        suffix = "гол" if top_cnt == 1 else ("гола" if top_cnt <= 4 else "голов")
+        lines.append(f"\n⚽ <b>Лучший бомбардир:</b> {top_name} ({top_cnt} {suffix})")
+
+    # Best player
+    if best_player_name:
+        lines.append(f"⭐ <b>Лучший игрок (по голосованию):</b> {best_player_name}")
+
+    lines.append("\n🙏 Всем спасибо за игру! До встречи на следующем турнире!")
+
+    result_text = "\n".join(lines)
+
+    # Broadcast to attendees
+    att_res = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES,
+        )
+    )
+    attendees = att_res.scalars().all()
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="📢 Разослать итоги всем",
+        callback_data=f"gd_results_broadcast:{game_day_id}"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data=f"gd_players:{game_day_id}"
+    ))
+
+    await call.message.edit_text(result_text, reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("gd_results_broadcast:"))
+async def gd_results_broadcast(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("📢 Рассылаю...")
+
+    from collections import Counter
+    from app.database.models import (
+        Match, MatchStatus, Goal, GoalType, Card, CardType,
+        Team, RatingRound, RatingVote,
+    )
+    from sqlalchemy.orm import selectinload
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        return
+
+    matches_res = await session.execute(
+        select(Match)
+        .options(
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        )
+        .where(Match.game_day_id == game_day_id, Match.status == MatchStatus.FINISHED)
+    )
+    finished_matches = matches_res.scalars().all()
+
+    places: dict[int, str] = {}
+    final_match = next(
+        (m for m in finished_matches if (m.match_stage or "group") == "final"), None
+    )
+    third_match = next(
+        (m for m in finished_matches if (m.match_stage or "group") == "third_place"), None
+    )
+    if final_match:
+        if final_match.score_home >= final_match.score_away:
+            places[final_match.team_home_id] = "🥇 1-е место"
+            places[final_match.team_away_id] = "🥈 2-е место"
+        else:
+            places[final_match.team_away_id] = "🥇 1-е место"
+            places[final_match.team_home_id] = "🥈 2-е место"
+    if third_match:
+        if third_match.score_home >= third_match.score_away:
+            places[third_match.team_home_id] = "🥉 3-е место"
+            places[third_match.team_away_id] = "❤️ Приз зрительских симпатий (4-е место)"
+        else:
+            places[third_match.team_away_id] = "🥉 3-е место"
+            places[third_match.team_home_id] = "❤️ Приз зрительских симпатий (4-е место)"
+
+    goal_counts: Counter = Counter()
+    for m in finished_matches:
+        for g in m.goals:
+            if g.goal_type != GoalType.OWN_GOAL and g.player:
+                goal_counts[g.player.name] += 1
+
+    best_player_name: str | None = None
+    rating_res = await session.execute(
+        select(RatingRound)
+        .options(selectinload(RatingRound.votes))
+        .where(
+            RatingRound.game_day_id == game_day_id,
+            RatingRound.status == "finished",
+        )
+        .order_by(RatingRound.id.desc())
+        .limit(1)
+    )
+    last_round = rating_res.scalar_one_or_none()
+    if last_round and last_round.votes:
+        from collections import Counter as _C
+        vote_totals: _C = _C()
+        for v in last_round.votes:
+            vote_totals[v.nominee_id] += v.score
+        best_id = vote_totals.most_common(1)[0][0]
+        bp = await session.get(Player, best_id)
+        if bp:
+            best_player_name = bp.name
+
+    lines = [f"🏆 <b>Итоги турнира — {game_day.display_name}</b>\n"]
+    order = ["🥇 1-е место", "🥈 2-е место", "🥉 3-е место",
+             "❤️ Приз зрительских симпатий (4-е место)"]
+    for label in order:
+        team_id = next((tid for tid, lbl in places.items() if lbl == label), None)
+        if team_id:
+            team = await session.get(Team, team_id)
+            if team:
+                lines.append(f"{label}: <b>{team.color_emoji} {team.name}</b>")
+
+    if goal_counts:
+        top_name, top_cnt = goal_counts.most_common(1)[0]
+        suffix = "гол" if top_cnt == 1 else ("гола" if top_cnt <= 4 else "голов")
+        lines.append(f"\n⚽ <b>Лучший бомбардир:</b> {top_name} ({top_cnt} {suffix})")
+    if best_player_name:
+        lines.append(f"⭐ <b>Лучший игрок:</b> {best_player_name}")
+    lines.append("\n🙏 Всем спасибо за игру! До встречи!")
+
+    broadcast_text = "\n".join(lines)
+
+    att_res = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES,
+        )
+    )
+    attendees = att_res.scalars().all()
+
+    sent = 0
+    for att in attendees:
+        try:
+            await bot.send_message(att.player.telegram_id, broadcast_text)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Cannot send results to {att.player.telegram_id}: {e}")
+
+    from app.keyboards.game_day import game_day_action_kb
+    await call.message.answer(
+        f"✅ Итоги разосланы <b>{sent}</b> игрокам.",
+        reply_markup=game_day_action_kb(game_day_id)
+    )

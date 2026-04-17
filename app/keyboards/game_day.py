@@ -66,6 +66,9 @@ def game_day_action_kb(game_day_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🎲 Создать команды", callback_data=f"gd_auto_teams:{game_day_id}"),
     )
     builder.row(
+        InlineKeyboardButton(text="🏆 Итоги турнира", callback_data=f"gd_tournament_results:{game_day_id}"),
+    )
+    builder.row(
         InlineKeyboardButton(text="❌ Отменить игру", callback_data=f"gd_cancel:{game_day_id}"),
         InlineKeyboardButton(text="🗑 Удалить игру", callback_data=f"gd_delete:{game_day_id}"),
     )

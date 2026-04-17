@@ -95,6 +95,13 @@ async def _run_migrations(conn):
             await conn.execute(text(
                 "ALTER TABLE rating_rounds ADD COLUMN game_day_id INTEGER"
             ))
+
+        result5 = await conn.execute(text("PRAGMA table_info(matches)"))
+        match_cols2 = [row[1] for row in result5.fetchall()]
+        if "match_stage" not in match_cols2:
+            await conn.execute(text(
+                "ALTER TABLE matches ADD COLUMN match_stage VARCHAR(20) DEFAULT 'group'"
+            ))
     else:
         # PostgreSQL
         await conn.execute(text(
@@ -123,6 +130,9 @@ async def _run_migrations(conn):
         ))
         await conn.execute(text(
             "ALTER TABLE rating_rounds ADD COLUMN IF NOT EXISTS game_day_id INTEGER REFERENCES game_days(id)"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE matches ADD COLUMN IF NOT EXISTS match_stage VARCHAR(20) DEFAULT 'group'"
         ))
 
 
