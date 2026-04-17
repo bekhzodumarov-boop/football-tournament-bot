@@ -200,6 +200,9 @@ async def cb_my_profile(call: CallbackQuery, player: Player | None):
     pos_label = POSITION_LABELS.get(player.position, player.position)
     provisional = t('provisional_label', lang) if player.rating_provisional else ""
 
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+    from aiogram.types import InlineKeyboardButton as IKBBtn
+
     text = t('profile_title', lang,
              name=player.name,
              position=pos_label,
@@ -208,7 +211,16 @@ async def cb_my_profile(call: CallbackQuery, player: Player | None):
              reliability=f"{player.reliability_pct:.0f}",
              games=player.games_played,
              balance=player.balance)
-    await call.message.edit_text(text, reply_markup=main_menu_kb(lang))
+
+    kb = IKB()
+    kb.row(IKBBtn(
+        text="✏️ Редактировать профиль" if lang == "ru" else "✏️ Edit Profile",
+        callback_data="edit_profile"
+    ))
+    for row in main_menu_kb(lang).inline_keyboard:
+        kb.row(*row)
+
+    await call.message.edit_text(text, reply_markup=kb.as_markup())
 
 
 @router.callback_query(lambda c: c.data == "players_list")

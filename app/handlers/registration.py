@@ -30,6 +30,7 @@ class EditProfileFSM(StatesGroup):
     waiting_position = State()
     waiting_phone = State()
     waiting_photo = State()
+    waiting_gender = State()
 
 
 # ── Cancel работает в любом FSM-состоянии (регистрируется ПЕРВЫМ) ──
@@ -272,8 +273,11 @@ def _edit_profile_menu_kb() -> object:
         InlineKeyboardButton(text="📍 Позиция", callback_data="ep_position"),
         InlineKeyboardButton(text="📱 Телефон", callback_data="ep_phone"),
     )
-    builder.row(InlineKeyboardButton(text="📸 Фото", callback_data="ep_photo"))
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu"))
+    builder.row(
+        InlineKeyboardButton(text="📸 Фото", callback_data="ep_photo"),
+        InlineKeyboardButton(text="👤 Обращение", callback_data="ep_gender"),
+    )
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="my_profile"))
     return builder.as_markup()
 
 
@@ -294,6 +298,8 @@ async def cmd_edit_profile(event, player: Player | None, state: FSMContext):
     await state.set_state(EditProfileFSM.choosing)
     pos_label = POSITION_LABELS.get(player.position, player.position)
     username_line = f"@{player.username}" if player.username else "—"
+    gender_val = getattr(player, 'gender', 'm') or 'm'
+    gender_label = "👩 Женский (она)" if gender_val == 'f' else "👨 Мужской (он)"
 
     await send(
         f"✏️ <b>Редактирование профиля</b>\n\n"
@@ -301,6 +307,7 @@ async def cmd_edit_profile(event, player: Player | None, state: FSMContext):
         f"📍 Позиция: {pos_label}\n"
         f"📱 Телефон: {player.phone or '—'}\n"
         f"📸 Фото: {'есть' if player.photo_file_id else 'нет'}\n"
+        f"👤 Обращение: {gender_label}\n"
         f"🔗 Telegram: {username_line} <i>(нельзя изменить)</i>\n\n"
         "Что хочешь изменить?",
         reply_markup=_edit_profile_menu_kb()
@@ -452,3 +459,47 @@ async def ep_photo_remove(message: Message, state: FSMContext, session: AsyncSes
 @router.message(EditProfileFSM.waiting_photo)
 async def ep_photo_wrong(message: Message):
     await message.answer("📸 Пришли фото или напиши /skip")
+
+
+# -- Изменить обращение (пол) --
+
+@router.callback_query(EditProfileFSM.choosing, F.data == "ep_gender")
+async def ep_gender_start(call: CallbackQuery, state: FSMContext, player: Player | None):
+    await call.answer()
+    await state.set_state(EditProfileFSM.waiting_gender)
+
+    gender_val = getattr(player, 'gender', 'm') or 'm' if player else 'm'
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="👨 Мужской (он)" + (" ✅" if gender_val == 'm' else ""),
+            callback_data="ep_gender_save:m"
+        ),
+        InlineKeyboardButton(
+            text="👩 Женский (она)" + (" ✅" if gender_val == 'f' else ""),
+            callback_data="ep_gender_save:f"
+        ),
+    )
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="edit_profile"))
+
+    await call.message.edit_text(
+        "👤 <b>Как к тебе обращаться?</b>\n\n"
+        "Бот будет использовать правильное обращение в уведомлениях.",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(EditProfileFSM.waiting_gender, F.data.startswith("ep_gender_save:"))
+async def ep_gender_save(call: CallbackQuery, state: FSMContext, session: AsyncSession,
+                         player: Player | None):
+    await call.answer()
+    gender = call.data.split(":")[1]
+    if player:
+        player.gender = gender
+        await session.commit()
+    await state.set_state(EditProfileFSM.choosing)
+    label = "👩 Женский (она)" if gender == 'f' else "👨 Мужской (он)"
+    await call.message.edit_text(
+        f"✅ Обращение изменено: <b>{label}</b>.",
+        reply_markup=_edit_profile_menu_kb()
+    )
