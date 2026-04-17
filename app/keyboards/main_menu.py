@@ -2,25 +2,26 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import settings
+from app.locales.texts import t
 
 
-def main_menu_kb() -> InlineKeyboardMarkup:
+def main_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="⚽ Ближайшая игра", callback_data="next_game"),
+        InlineKeyboardButton(text=t("btn_upcoming_game", lang), callback_data="next_game"),
     )
     builder.row(
-        InlineKeyboardButton(text="📊 Моя статистика", callback_data="my_stats"),
-        InlineKeyboardButton(text="👥 Игроки", callback_data="players_list"),
+        InlineKeyboardButton(text=t("btn_my_stats", lang), callback_data="my_stats"),
+        InlineKeyboardButton(text=t("btn_players_list", lang), callback_data="players_list"),
     )
     builder.row(
-        InlineKeyboardButton(text="📋 Результаты игр", callback_data="match_results"),
-        InlineKeyboardButton(text="ℹ️ Мой профиль", callback_data="my_profile"),
+        InlineKeyboardButton(text=t("btn_results", lang), callback_data="match_results"),
+        InlineKeyboardButton(text=t("btn_profile", lang), callback_data="my_profile"),
     )
     # Таблица: WebApp если URL задан, иначе обычная текстовая
     if settings.WEBAPP_URL:
         builder.row(
-            InlineKeyboardButton(text="🏆 Таблица турнира", callback_data="tournament_standings"),
+            InlineKeyboardButton(text=t("btn_standings", lang), callback_data="tournament_standings"),
             InlineKeyboardButton(
                 text="🌐 Живая таблица",
                 web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/")
@@ -28,10 +29,28 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         )
     else:
         builder.row(
-            InlineKeyboardButton(text="🏆 Таблица турнира", callback_data="tournament_standings"),
+            InlineKeyboardButton(text=t("btn_standings", lang), callback_data="tournament_standings"),
         )
     builder.row(
-        InlineKeyboardButton(text="📜 Регламент турнира", callback_data="reglament"),
+        InlineKeyboardButton(text=t("btn_rules", lang), callback_data="reglament"),
+    )
+    builder.row(
+        InlineKeyboardButton(text=t("btn_language", lang), callback_data="language_menu"),
+    )
+    return builder.as_markup()
+
+
+def language_kb(current_lang: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🇷🇺 Русский" + (" ✅" if current_lang == "ru" else ""),
+            callback_data="set_lang:ru"
+        ),
+        InlineKeyboardButton(
+            text="🇬🇧 English" + (" ✅" if current_lang == "en" else ""),
+            callback_data="set_lang:en"
+        ),
     )
     return builder.as_markup()
 

@@ -16,8 +16,9 @@ from app.database.models import (
     Player, MatchFormat
 )
 from app.keyboards.game_day import join_game_kb, join_confirm_kb, game_day_action_kb
-from app.data.reglament import REGLAMENT_AGREEMENT
+from app.data.reglament import REGLAMENT_AGREEMENT, REGLAMENT_AGREEMENT_EN
 from app.reminders import schedule_reminders
+from app.locales.texts import t
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -127,10 +128,12 @@ async def join_pre(call: CallbackQuery, player: Player | None):
         await call.message.answer("❌ Сначала зарегистрируйся: /register")
         return
 
+    lang = getattr(player, 'language', None) or 'ru'
+    agreement = REGLAMENT_AGREEMENT_EN if lang == 'en' else REGLAMENT_AGREEMENT
     await call.message.edit_text(
         f"⚽ <b>Регистрация на игру</b>\n\n"
-        f"{REGLAMENT_AGREEMENT}",
-        reply_markup=join_confirm_kb(game_day_id)
+        f"{agreement}",
+        reply_markup=join_confirm_kb(game_day_id, lang)
     )
 
 
@@ -219,12 +222,9 @@ async def join_game(call: CallbackQuery, session: AsyncSession, player: Player |
             ))
         await session.commit()
 
+        lang = getattr(player, 'language', None) or 'ru'
         await call.message.edit_text(
-            f"📋 <b>Мест нет — ты в листе ожидания</b>\n\n"
-            f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
-            f"📍 {game_day.location}\n\n"
-            f"🔢 Твоя позиция: <b>#{my_position}</b>\n\n"
-            "Если кто-то откажется — ты получишь уведомление!"
+            t('join_waitlist', lang, position=my_position)
         )
         return
 
@@ -245,15 +245,11 @@ async def join_game(call: CallbackQuery, session: AsyncSession, player: Player |
 
     await session.commit()
 
-    registered_new = registered + 1
-    name_line = f"🏆 {game_day.display_name}\n" if game_day.tournament_number else ""
+    lang = getattr(player, 'language', None) or 'ru'
     await call.message.edit_text(
-        f"✅ <b>Ты записан!</b>\n\n"
-        f"{name_line}"
-        f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
-        f"📍 {game_day.location}\n"
-        f"👥 Записалось: {registered_new}/{game_day.player_limit}\n\n"
-        "До встречи на поле! ⚽"
+        t('join_success', lang,
+          date=game_day.scheduled_at.strftime('%d.%m.%Y %H:%M'),
+          location=game_day.location)
     )
 
 
@@ -289,7 +285,8 @@ async def decline_game(call: CallbackQuery, session: AsyncSession,
         ))
 
     await session.commit()
-    await call.message.edit_text("❌ Понял, ты не придёшь. Увидимся в следующий раз!")
+    lang = getattr(player, 'language', None) or 'ru'
+    await call.message.edit_text(t('join_declined', lang))
 
     if was_confirmed:
         await _notify_first_waitlist(session, game_day_id, bot)
@@ -315,13 +312,13 @@ async def _notify_first_waitlist(session: AsyncSession, game_day_id: int, bot: B
         return
 
     try:
+        lang = getattr(first.player, 'language', None) or 'ru'
         await bot.send_message(
             first.player.telegram_id,
-            f"🎉 <b>Место освободилось!</b>\n\n"
-            f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
-            f"📍 {game_day.location}\n\n"
-            "Ты первый в листе ожидания. Хочешь записаться?",
-            reply_markup=join_game_kb(game_day_id, game_day.is_open)
+            t('waitlist_promoted', lang,
+              date=game_day.scheduled_at.strftime('%d.%m.%Y %H:%M'),
+              location=game_day.location),
+            reply_markup=join_game_kb(game_day_id, game_day.is_open, lang)
         )
     except Exception as e:
         logger.warning(f"Cannot notify waitlist player {first.player.telegram_id}: {e}")

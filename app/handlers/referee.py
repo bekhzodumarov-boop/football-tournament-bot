@@ -43,6 +43,7 @@ from app.keyboards.referee import (
     sub_player_out_kb, sub_player_in_kb, pick_format_kb, pick_stage_kb,
 )
 from app.scheduler import scheduler
+from app.locales.texts import t
 
 router = Router()
 
@@ -1021,6 +1022,35 @@ async def ref_red_record(call: CallbackQuery, session: AsyncSession,
 
 
 # ─────────────────────────────────────────────
+#  Match result text builder (per language)
+# ─────────────────────────────────────────────
+
+def _build_match_result_text(match: Match, lang: str = 'ru') -> str:
+    home = match.team_home.name
+    away = match.team_away.name
+    text = t('match_result_text', lang,
+             home=home, score_home=match.score_home,
+             score_away=match.score_away, away=away)
+
+    goals_by_team: dict[int, list[str]] = {}
+    for g in sorted(match.goals, key=lambda x: x.scored_at):
+        own = (" (авт.)" if lang == 'ru' else " (o.g.)") if g.goal_type == GoalType.OWN_GOAL else ""
+        goals_by_team.setdefault(g.team_id, []).append(f"{g.player.name}{own}")
+
+    if goals_by_team.get(match.team_home_id):
+        text += f"\n🔴 {home}: " + ", ".join(goals_by_team[match.team_home_id])
+    if goals_by_team.get(match.team_away_id):
+        text += f"\n🔵 {away}: " + ", ".join(goals_by_team[match.team_away_id])
+
+    if match.cards:
+        text += t('match_cards_header', lang)
+        for c in sorted(match.cards, key=lambda x: x.issued_at):
+            emoji = "🟨" if c.card_type == CardType.YELLOW else "🟥"
+            text += f"\n  {emoji} {c.player.name}"
+    return text
+
+
+# ─────────────────────────────────────────────
 #  ЗАВЕРШИТЬ МАТЧ
 # ─────────────────────────────────────────────
 
@@ -1069,41 +1099,22 @@ async def ref_finish_match(call: CallbackQuery, session: AsyncSession,
         pass
     _active_timers.pop(match_id, None)
 
-    home = match.team_home.name
-    away = match.team_away.name
-
-    result_text = (
-        f"🏁 <b>Финальный счёт</b>\n\n"
-        f"⚽ <b>{home}  {match.score_home} : {match.score_away}  {away}</b>\n"
-    )
-
-    goals_by_team: dict[int, list[str]] = {}
-    for g in sorted(match.goals, key=lambda x: x.scored_at):
-        own = " (авт.)" if g.goal_type == GoalType.OWN_GOAL else ""
-        goals_by_team.setdefault(g.team_id, []).append(f"{g.player.name}{own}")
-
-    if goals_by_team.get(match.team_home_id):
-        result_text += f"\n🔴 {home}: " + ", ".join(goals_by_team[match.team_home_id])
-    if goals_by_team.get(match.team_away_id):
-        result_text += f"\n🔵 {away}: " + ", ".join(goals_by_team[match.team_away_id])
-
-    if match.cards:
-        result_text += "\n\n<b>Карточки:</b>"
-        for c in sorted(match.cards, key=lambda x: x.issued_at):
-            emoji = "🟨" if c.card_type == CardType.YELLOW else "🟥"
-            result_text += f"\n  {emoji} {c.player.name}"
+    # Build admin display text (Russian)
+    result_text = _build_match_result_text(match, 'ru')
 
     await call.message.edit_text(
         result_text,
         reply_markup=referee_match_kb(match_id, is_started=True, is_finished=True)
     )
 
-    # Разослать результаты участникам
+    # Разослать результаты участникам (per-language)
     game_day_players = await _get_attendees(session, match.game_day_id)
     notified = 0
     for p in game_day_players:
         try:
-            await bot.send_message(p.telegram_id, result_text)
+            lang = getattr(p, 'language', None) or 'ru'
+            text = _build_match_result_text(match, lang)
+            await bot.send_message(p.telegram_id, text)
             notified += 1
         except Exception as e:
             logger.warning(f"Cannot send match result to {p.telegram_id}: {e}")

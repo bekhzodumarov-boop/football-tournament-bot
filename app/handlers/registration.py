@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import Player, Position, League, POSITION_LABELS
 from app.keyboards.registration import position_kb, self_rating_kb
-from app.keyboards.main_menu import main_menu_kb
+from app.keyboards.main_menu import main_menu_kb, language_kb
+from app.locales.texts import t
 
 router = Router()
 

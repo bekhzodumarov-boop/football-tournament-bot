@@ -28,6 +28,7 @@ from app.database.models import (
     Player, PlayerStatus, Match, Goal, Card, League, RatingRound, RatingVote,
 )
 from app.database.models import _gen_invite_code
+from app.locales.texts import t, goals_word as gw
 
 router = Router()
 
@@ -425,17 +426,16 @@ async def _broadcast_finance(msg, state: FSMContext, session: AsyncSession, bot:
     await session.commit()
 
     attendees = [a for a in game_day.attendances if a.response == AttendanceResponse.YES]
-    text = (
-        f"💰 <b>Взнос за {game_day.display_name}</b>\n\n"
-        f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y')}\n"
-        f"📍 {game_day.location}\n\n"
-        f"💵 Сумма к оплате: <b>{cost_per:,} сум.</b>\n\n"
-        "Пожалуйста, оплати взнос организатору. Спасибо! 🙏"
-    )
 
     sent = 0
     for att in attendees:
         try:
+            lang = getattr(att.player, 'language', None) or 'ru'
+            text = t('finance_notice', lang,
+                     game_name=game_day.display_name,
+                     date=game_day.scheduled_at.strftime('%d.%m.%Y'),
+                     location=game_day.location,
+                     amount=f"{cost_per:,}")
             await bot.send_message(att.player.telegram_id, text)
             sent += 1
             await asyncio.sleep(0.05)
@@ -842,12 +842,10 @@ async def adm_rating_round_start(call: CallbackQuery, session: AsyncSession, bot
     sent = 0
     for p in players:
         try:
+            lang = getattr(p, 'language', None) or 'ru'
             await bot.send_message(
                 p.telegram_id,
-                f"⭐ <b>Рейтинг-голосование!</b>\n\n"
-                f"Оцени других игроков лиги от 1 до 10.\n"
-                f"Твои оценки влияют на рейтинг участников.\n\n"
-                "<i>Займёт 1-2 минуты</i>",
+                t('rating_invite', lang),
                 reply_markup=vote_kb.as_markup()
             )
             sent += 1
@@ -920,6 +918,8 @@ async def rv_start_voting(call: CallbackQuery, state: FSMContext, session: Async
         await call.message.edit_text("Нет других игроков для оценки.")
         return
 
+    voter_lang = getattr(voter, 'language', None) or 'ru'
+
     # Сохранить список в FSM
     await state.set_state(RatingVoteFSM.voting)
     await state.update_data(
@@ -927,6 +927,7 @@ async def rv_start_voting(call: CallbackQuery, state: FSMContext, session: Async
         nominees=[{"id": p.id, "name": p.name} for p in nominees],
         current_idx=0,
         scores={},
+        voter_lang=voter_lang,
     )
 
     # Показать первого
@@ -939,6 +940,7 @@ async def _show_vote_nominee(msg, data: dict, edit: bool = False):
     total = len(nominees)
     nominee = nominees[idx]
     scores = data.get("scores", {})
+    lang = data.get("voter_lang", "ru")
 
     builder = InlineKeyboardBuilder()
     current_score = scores.get(str(nominee["id"]))
@@ -953,25 +955,24 @@ async def _show_vote_nominee(msg, data: dict, edit: bool = False):
     # Навигация
     nav_row = []
     if idx > 0:
-        nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data="rv_prev"))
+        nav_row.append(InlineKeyboardButton(text=t('btn_vote_prev', lang), callback_data="rv_prev"))
     if idx < total - 1:
-        nav_row.append(InlineKeyboardButton(text="▶️ Далее", callback_data="rv_next"))
+        nav_row.append(InlineKeyboardButton(text=t('btn_vote_next', lang), callback_data="rv_next"))
     if nav_row:
         builder.row(*nav_row)
 
     already_scored = str(nominee["id"]) in scores
     if idx == total - 1 and already_scored:
-        builder.row(InlineKeyboardButton(text="✅ Отправить голоса", callback_data="rv_submit"))
+        builder.row(InlineKeyboardButton(text=t('btn_vote_submit', lang), callback_data="rv_submit"))
     elif all(str(n["id"]) in scores for n in nominees):
-        builder.row(InlineKeyboardButton(text="✅ Отправить голоса", callback_data="rv_submit"))
+        builder.row(InlineKeyboardButton(text=t('btn_vote_submit', lang), callback_data="rv_submit"))
 
-    current_display = str(scores[str(nominee["id"])]) if str(nominee["id"]) in scores else "<i>не выбрана</i>"
-    text = (
-        f"⭐ <b>Голосование</b> — {idx + 1}/{total}\n\n"
-        f"👤 <b>{nominee['name']}</b>\n\n"
-        f"Твоя оценка: <b>{current_display}</b>\n\n"
-        f"<i>Оцени от 1 (слабо) до 10 (отлично)</i>"
-    )
+    current_display = str(scores[str(nominee["id"])]) if str(nominee["id"]) in scores else t('score_not_set', lang)
+    text = t('rating_vote_nominee', lang,
+             current=idx + 1,
+             total=total,
+             name=nominee['name'],
+             score=current_display)
 
     if edit:
         await msg.edit_text(text, reply_markup=builder.as_markup())
@@ -1055,11 +1056,10 @@ async def rv_submit(call: CallbackQuery, state: FSMContext, session: AsyncSessio
 
     await session.commit()
 
+    lang = data.get("voter_lang", "ru")
     total_voted = len(scores)
     await call.message.edit_text(
-        f"✅ <b>Голоса отправлены!</b>\n\n"
-        f"Ты оценил {total_voted} игроков.\n"
-        "Спасибо! Результаты будут применены после завершения раунда. 🙏"
+        t('rating_voted', lang, count=total_voted)
     )
 
 
@@ -1211,12 +1211,10 @@ async def gd_rating_poll_start(call: CallbackQuery, session: AsyncSession, bot: 
     sent = 0
     for p in players:
         try:
+            lang = getattr(p, 'language', None) or 'ru'
             await bot.send_message(
                 p.telegram_id,
-                f"⭐ <b>Оцени игроков!</b>\n\n"
-                f"Перед делением на команды ({game_day.display_name}) "
-                f"оцени участников от 1 до 10.\n\n"
-                f"Это займёт 1–2 минуты и поможет сделать команды сбалансированнее.",
+                t('rating_invite_gameday', lang, game_name=game_day.display_name),
                 reply_markup=vote_kb.as_markup()
             )
             sent += 1
@@ -1648,6 +1646,7 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
                 "name": p.name,
                 "pos": POSITION_LABELS.get(p.position, p.position),
                 "rating": p.rating,
+                "language": getattr(p, 'language', None) or 'ru',
             }
             for p in bucket
         ]
@@ -1666,17 +1665,16 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
         member_names = [m["name"] for m in team_info["members"]]
         for member in team_info["members"]:
             other_names = [n for n in member_names if n != member["name"]]
-            teammates_text = ", ".join(other_names) if other_names else "пока никого нет"
+            lang = member.get('language', 'ru')
+            teammates_text = ", ".join(other_names) if other_names else ("пока никого нет" if lang == 'ru' else "no one yet")
             try:
                 await bot.send_message(
                     member["telegram_id"],
-                    f"⚽ <b>Команды на игру {gd_name} сформированы!</b>\n\n"
-                    f"Мы провели разбивку на команды с балансировкой "
-                    f"по рейтингу и позициям.\n\n"
-                    f"Ты сегодня играешь в команде "
-                    f"<b>{team_info['color']} {team_info['name']}</b>.\n\n"
-                    f"С тобой в команде играют: <b>{teammates_text}</b>\n\n"
-                    f"Удачи на игре! 🏆"
+                    t('team_assigned', lang,
+                      game_name=gd_name,
+                      team_color=team_info['color'],
+                      team_name=team_info['name'],
+                      teammates=teammates_text)
                 )
                 sent += 1
                 await asyncio.sleep(0.05)
@@ -1778,21 +1776,24 @@ async def gd_tournament_results(call: CallbackQuery, session: AsyncSession, bot:
         (m for m in finished_matches if (m.match_stage or "group") == "third_place"), None
     )
 
+    # Use place_teams: place_number → team_id
+    place_teams: dict[int, int] = {}
+
     if final_match:
         if final_match.score_home >= final_match.score_away:
-            places[final_match.team_home_id] = "🥇 1-е место"
-            places[final_match.team_away_id] = "🥈 2-е место"
+            place_teams[1] = final_match.team_home_id
+            place_teams[2] = final_match.team_away_id
         else:
-            places[final_match.team_away_id] = "🥇 1-е место"
-            places[final_match.team_home_id] = "🥈 2-е место"
+            place_teams[1] = final_match.team_away_id
+            place_teams[2] = final_match.team_home_id
 
     if third_match:
         if third_match.score_home >= third_match.score_away:
-            places[third_match.team_home_id] = "🥉 3-е место"
-            places[third_match.team_away_id] = "❤️ Приз зрительских симпатий (4-е место)"
+            place_teams[3] = third_match.team_home_id
+            place_teams[4] = third_match.team_away_id
         else:
-            places[third_match.team_away_id] = "🥉 3-е место"
-            places[third_match.team_home_id] = "❤️ Приз зрительских симпатий (4-е место)"
+            place_teams[3] = third_match.team_away_id
+            place_teams[4] = third_match.team_home_id
 
     # ── Top scorer ──
     goal_counts: Counter = Counter()
@@ -1823,20 +1824,17 @@ async def gd_tournament_results(call: CallbackQuery, session: AsyncSession, bot:
         if bp:
             best_player_name = bp.name
 
-    # ── Build result text ──
-    lines = [f"🏆 <b>Итоги турнира — {game_day.display_name}</b>\n"]
+    # ── Build admin result text (Russian) ──
+    place_keys = {1: 'place_1', 2: 'place_2', 3: 'place_3', 4: 'place_4'}
+    lines = [t('tournament_results_header', 'ru', game_name=game_day.display_name)]
 
-    # Places
-    if places:
-        # Sort by place order
-        order = ["🥇 1-е место", "🥈 2-е место", "🥉 3-е место",
-                 "❤️ Приз зрительских симпатий (4-е место)"]
-        for label in order:
-            team_id = next((tid for tid, lbl in places.items() if lbl == label), None)
+    if place_teams:
+        for place_num, key in place_keys.items():
+            team_id = place_teams.get(place_num)
             if team_id:
                 team = await session.get(Team, team_id)
                 if team:
-                    lines.append(f"{label}: <b>{team.color_emoji} {team.name}</b>")
+                    lines.append(f"{t(key, 'ru')}: <b>{team.color_emoji} {team.name}</b>")
     else:
         lines.append("⚠️ Финал и матч за 3 место не найдены.")
         lines.append("Назначь матчи с нужными стадиями в панели судьи.")
@@ -1844,17 +1842,17 @@ async def gd_tournament_results(call: CallbackQuery, session: AsyncSession, bot:
     # Top scorer
     if goal_counts:
         top_name, top_cnt = goal_counts.most_common(1)[0]
-        suffix = "гол" if top_cnt == 1 else ("гола" if top_cnt <= 4 else "голов")
-        lines.append(f"\n⚽ <b>Лучший бомбардир:</b> {top_name} ({top_cnt} {suffix})")
+        lines.append(t('top_scorer', 'ru', name=top_name, count=top_cnt, goals_word=gw(top_cnt, 'ru')))
 
     # Best player
     if best_player_name:
-        lines.append(f"⭐ <b>Лучший игрок (по голосованию):</b> {best_player_name}")
+        lines.append(t('best_player', 'ru', name=best_player_name))
 
-    lines.append("\n🙏 Всем спасибо за игру! До встречи на следующем турнире!")
+    lines.append(t('tournament_thanks', 'ru'))
 
     result_text = "\n".join(lines)
 
+    # Store place_teams for broadcast
     # Broadcast to attendees
     att_res = await session.execute(
         select(Attendance)
@@ -1909,7 +1907,7 @@ async def gd_results_broadcast(call: CallbackQuery, session: AsyncSession, bot: 
     )
     finished_matches = matches_res.scalars().all()
 
-    places: dict[int, str] = {}
+    place_teams: dict[int, int] = {}
     final_match = next(
         (m for m in finished_matches if (m.match_stage or "group") == "final"), None
     )
@@ -1918,18 +1916,18 @@ async def gd_results_broadcast(call: CallbackQuery, session: AsyncSession, bot: 
     )
     if final_match:
         if final_match.score_home >= final_match.score_away:
-            places[final_match.team_home_id] = "🥇 1-е место"
-            places[final_match.team_away_id] = "🥈 2-е место"
+            place_teams[1] = final_match.team_home_id
+            place_teams[2] = final_match.team_away_id
         else:
-            places[final_match.team_away_id] = "🥇 1-е место"
-            places[final_match.team_home_id] = "🥈 2-е место"
+            place_teams[1] = final_match.team_away_id
+            place_teams[2] = final_match.team_home_id
     if third_match:
         if third_match.score_home >= third_match.score_away:
-            places[third_match.team_home_id] = "🥉 3-е место"
-            places[third_match.team_away_id] = "❤️ Приз зрительских симпатий (4-е место)"
+            place_teams[3] = third_match.team_home_id
+            place_teams[4] = third_match.team_away_id
         else:
-            places[third_match.team_away_id] = "🥉 3-е место"
-            places[third_match.team_home_id] = "❤️ Приз зрительских симпатий (4-е место)"
+            place_teams[3] = third_match.team_away_id
+            place_teams[4] = third_match.team_home_id
 
     goal_counts: Counter = Counter()
     for m in finished_matches:
@@ -1959,25 +1957,13 @@ async def gd_results_broadcast(call: CallbackQuery, session: AsyncSession, bot: 
         if bp:
             best_player_name = bp.name
 
-    lines = [f"🏆 <b>Итоги турнира — {game_day.display_name}</b>\n"]
-    order = ["🥇 1-е место", "🥈 2-е место", "🥉 3-е место",
-             "❤️ Приз зрительских симпатий (4-е место)"]
-    for label in order:
-        team_id = next((tid for tid, lbl in places.items() if lbl == label), None)
-        if team_id:
-            team = await session.get(Team, team_id)
-            if team:
-                lines.append(f"{label}: <b>{team.color_emoji} {team.name}</b>")
-
-    if goal_counts:
-        top_name, top_cnt = goal_counts.most_common(1)[0]
-        suffix = "гол" if top_cnt == 1 else ("гола" if top_cnt <= 4 else "голов")
-        lines.append(f"\n⚽ <b>Лучший бомбардир:</b> {top_name} ({top_cnt} {suffix})")
-    if best_player_name:
-        lines.append(f"⭐ <b>Лучший игрок:</b> {best_player_name}")
-    lines.append("\n🙏 Всем спасибо за игру! До встречи!")
-
-    broadcast_text = "\n".join(lines)
+    # Build cached team names for places
+    place_team_objects: dict[int, Team] = {}
+    place_keys = {1: 'place_1', 2: 'place_2', 3: 'place_3', 4: 'place_4'}
+    for place_num, team_id in place_teams.items():
+        team_obj = await session.get(Team, team_id)
+        if team_obj:
+            place_team_objects[place_num] = team_obj
 
     att_res = await session.execute(
         select(Attendance)
@@ -1992,6 +1978,23 @@ async def gd_results_broadcast(call: CallbackQuery, session: AsyncSession, bot: 
     sent = 0
     for att in attendees:
         try:
+            lang = getattr(att.player, 'language', None) or 'ru'
+            lines = [t('tournament_results_header', lang, game_name=game_day.display_name)]
+
+            for place_num, key in place_keys.items():
+                team_obj = place_team_objects.get(place_num)
+                if team_obj:
+                    lines.append(f"{t(key, lang)}: <b>{team_obj.color_emoji} {team_obj.name}</b>")
+
+            if goal_counts:
+                top_name, top_cnt = goal_counts.most_common(1)[0]
+                lines.append(t('top_scorer', lang, name=top_name, count=top_cnt,
+                                goals_word=gw(top_cnt, lang)))
+            if best_player_name:
+                lines.append(t('best_player', lang, name=best_player_name))
+            lines.append(t('tournament_thanks', lang))
+
+            broadcast_text = "\n".join(lines)
             await bot.send_message(att.player.telegram_id, broadcast_text)
             sent += 1
             await asyncio.sleep(0.05)

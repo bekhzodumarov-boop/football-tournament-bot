@@ -120,6 +120,7 @@ class Player(Base):
     games_played: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[PlayerStatus] = mapped_column(Enum(PlayerStatus), default=PlayerStatus.ACTIVE)
     is_referee: Mapped[bool] = mapped_column(Boolean, default=False)
+    language: Mapped[str] = mapped_column(String(5), default="ru", nullable=False, server_default="ru")
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     league_id: Mapped[Optional[int]] = mapped_column(ForeignKey("leagues.id"), nullable=True)
