@@ -155,8 +155,10 @@ async def _run_migrations(conn):
 
 async def _run_enum_migrations(conn) -> None:
     """ALTER TYPE ... ADD VALUE нельзя запускать внутри транзакции."""
+    # PostgreSQL хранит enum как uppercase-имена (YES, NO, ...),
+    # поэтому добавляем WAITLIST в uppercase
     await conn.execute(text(
-        "ALTER TYPE attendanceresponse ADD VALUE IF NOT EXISTS 'waitlist'"
+        "ALTER TYPE attendanceresponse ADD VALUE IF NOT EXISTS 'WAITLIST'"
     ))
 
 
