@@ -25,7 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
-    Player, PlayerStatus, Match, Goal, Card, League, RatingRound, RatingVote,
+    Player, PlayerStatus, Match, MatchStatus, Goal, GoalType, Card, League,
+    RatingRound, RatingVote, Team, TeamPlayer,
 )
 from app.database.models import _gen_invite_code
 from app.locales.texts import t, goals_word as gw
@@ -55,6 +56,11 @@ class RatingVoteFSM(StatesGroup):
 
 class AutoTeamsFSM(StatesGroup):
     waiting_num_teams = State()
+
+
+class ScheduleFSM(StatesGroup):
+    waiting_team1 = State()
+    waiting_team2 = State()
 
 
 def _invite_share_url(invite_link: str, league_name: str) -> str:
@@ -2015,4 +2021,451 @@ async def gd_results_broadcast(call: CallbackQuery, session: AsyncSession, bot: 
     await call.message.answer(
         f"✅ Итоги разосланы <b>{sent}</b> игрокам.",
         reply_markup=game_day_action_kb(game_day_id)
+    )
+
+
+# ══════════════════════════════════════════════════════
+#  РАЗОСЛАТЬ ИТОГИ (I-013) — кнопка из action_kb
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("gd_post_results:"))
+async def gd_post_results(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    """Прямая рассылка итогов турнира всем участникам из action_kb."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("📢 Рассылаю итоги...")
+
+    from collections import Counter
+    from app.keyboards.game_day import game_day_action_kb
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        return
+
+    # Загружаем завершённые матчи
+    matches_res = await session.execute(
+        select(Match)
+        .options(
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        )
+        .where(Match.game_day_id == game_day_id, Match.status == MatchStatus.FINISHED)
+    )
+    finished_matches = matches_res.scalars().all()
+
+    if not finished_matches:
+        await call.answer(t('results_broadcast_empty', 'ru'), show_alert=True)
+        return
+
+    # Подсчёт мест
+    place_teams: dict[int, int] = {}
+    final_match = next((m for m in finished_matches if (m.match_stage or "group") == "final"), None)
+    third_match = next((m for m in finished_matches if (m.match_stage or "group") == "third_place"), None)
+    if final_match:
+        if final_match.score_home >= final_match.score_away:
+            place_teams[1], place_teams[2] = final_match.team_home_id, final_match.team_away_id
+        else:
+            place_teams[1], place_teams[2] = final_match.team_away_id, final_match.team_home_id
+    if third_match:
+        if third_match.score_home >= third_match.score_away:
+            place_teams[3], place_teams[4] = third_match.team_home_id, third_match.team_away_id
+        else:
+            place_teams[3], place_teams[4] = third_match.team_away_id, third_match.team_home_id
+
+    goal_counts: Counter = Counter()
+    for m in finished_matches:
+        for g in m.goals:
+            if g.goal_type != GoalType.OWN_GOAL and g.player:
+                goal_counts[g.player.name] += 1
+
+    place_keys = {1: 'place_1', 2: 'place_2', 3: 'place_3', 4: 'place_4'}
+    place_team_objects: dict[int, Team] = {}
+    for place_num, team_id in place_teams.items():
+        team_obj = await session.get(Team, team_id)
+        if team_obj:
+            place_team_objects[place_num] = team_obj
+
+    # Все матчи (для отображения результатов)
+    match_lines = []
+    for m in finished_matches:
+        match_lines.append(f"  ⚽ {m.team_home.name} {m.score_home}:{m.score_away} {m.team_away.name}")
+
+    # Рассылка участникам
+    att_res = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES,
+        )
+    )
+    attendees = att_res.scalars().all()
+
+    sent = 0
+    for att in attendees:
+        if not att.player:
+            continue
+        try:
+            lang = getattr(att.player, 'language', None) or 'ru'
+            lines = [t('tournament_results_header', lang, game_name=game_day.display_name)]
+            lines.append(f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y')}\n")
+
+            # Все результаты матчей
+            if match_lines:
+                lines.append("<b>Результаты матчей:</b>")
+                lines.extend(match_lines)
+                lines.append("")
+
+            # Места
+            for place_num, key in place_keys.items():
+                team_obj = place_team_objects.get(place_num)
+                if team_obj:
+                    lines.append(f"{t(key, lang)}: <b>{team_obj.color_emoji} {team_obj.name}</b>")
+
+            # Топ бомбардир
+            if goal_counts:
+                top_name, top_cnt = goal_counts.most_common(1)[0]
+                lines.append(t('top_scorer', lang, name=top_name, count=top_cnt,
+                                goals_word=gw(top_cnt, lang)))
+            lines.append(t('tournament_thanks', lang))
+
+            await bot.send_message(att.player.telegram_id, "\n".join(lines))
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"gd_post_results: cannot send to {att.player.telegram_id}: {e}")
+
+    await call.message.answer(
+        t('results_broadcast_sent', 'ru', count=sent),
+        reply_markup=game_day_action_kb(game_day_id)
+    )
+
+
+# ══════════════════════════════════════════════════════
+#  В КАНАЛ (I-043)
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("gd_to_channel:"))
+async def gd_to_channel(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    """Публикует итоги турнира в настроенный Telegram-канал."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    if not settings.CHANNEL_ID:
+        await call.answer(t('channel_not_set', 'ru'), show_alert=True)
+        return
+
+    from collections import Counter
+    from app.keyboards.game_day import game_day_action_kb
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        return
+
+    matches_res = await session.execute(
+        select(Match)
+        .options(
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        )
+        .where(Match.game_day_id == game_day_id, Match.status == MatchStatus.FINISHED)
+    )
+    finished_matches = matches_res.scalars().all()
+
+    if not finished_matches:
+        await call.answer("⚠️ Нет завершённых матчей.", show_alert=True)
+        return
+
+    # Строим пост для канала
+    place_teams: dict[int, int] = {}
+    final_match = next((m for m in finished_matches if (m.match_stage or "group") == "final"), None)
+    third_match = next((m for m in finished_matches if (m.match_stage or "group") == "third_place"), None)
+    if final_match:
+        if final_match.score_home >= final_match.score_away:
+            place_teams[1], place_teams[2] = final_match.team_home_id, final_match.team_away_id
+        else:
+            place_teams[1], place_teams[2] = final_match.team_away_id, final_match.team_home_id
+    if third_match:
+        if third_match.score_home >= third_match.score_away:
+            place_teams[3], place_teams[4] = third_match.team_home_id, third_match.team_away_id
+        else:
+            place_teams[3], place_teams[4] = third_match.team_away_id, third_match.team_home_id
+
+    goal_counts: Counter = Counter()
+    for m in finished_matches:
+        for g in m.goals:
+            if g.goal_type != GoalType.OWN_GOAL and g.player:
+                goal_counts[g.player.name] += 1
+
+    lines = [f"🏆 <b>Итоги {game_day.display_name}</b>"]
+    lines.append(f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y')} | 📍 {game_day.location}\n")
+
+    lines.append("<b>Результаты матчей:</b>")
+    for m in finished_matches:
+        lines.append(f"  ⚽ {m.team_home.name} {m.score_home}:{m.score_away} {m.team_away.name}")
+    lines.append("")
+
+    place_keys = {1: 'place_1', 2: 'place_2', 3: 'place_3', 4: 'place_4'}
+    for place_num, team_id in place_teams.items():
+        team_obj = await session.get(Team, team_id)
+        if team_obj:
+            lines.append(f"{t(place_keys[place_num], 'ru')}: <b>{team_obj.color_emoji} {team_obj.name}</b>")
+
+    if goal_counts:
+        top_name, top_cnt = goal_counts.most_common(1)[0]
+        lines.append(t('top_scorer', 'ru', name=top_name, count=top_cnt, goals_word=gw(top_cnt, 'ru')))
+
+    lines.append(t('tournament_thanks', 'ru'))
+
+    try:
+        await bot.send_message(settings.CHANNEL_ID, "\n".join(lines))
+        await call.answer(t('channel_posted', 'ru'), show_alert=True)
+    except Exception as e:
+        logger.error(f"gd_to_channel error: {e}")
+        await call.answer(f"❌ Ошибка при публикации: {e}", show_alert=True)
+
+
+# ══════════════════════════════════════════════════════
+#  РАСПИСАНИЕ МАТЧЕЙ (I-042)
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("gd_schedule:"))
+async def gd_schedule_view(call: CallbackQuery, session: AsyncSession):
+    """Показывает расписание матчей игрового дня и кнопки управления."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    from app.keyboards.game_day import game_day_action_kb
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        await call.message.edit_text("❌ Игровой день не найден.")
+        return
+
+    # Загружаем матчи с match_order > 0 (т.е. из расписания)
+    result = await session.execute(
+        select(Match)
+        .options(selectinload(Match.team_home), selectinload(Match.team_away))
+        .where(Match.game_day_id == game_day_id, Match.match_order > 0)
+        .order_by(Match.match_order)
+    )
+    scheduled = result.scalars().all()
+
+    status_emoji = {
+        "scheduled": "⏳",
+        "in_progress": "▶️",
+        "finished": "✅",
+    }
+
+    lines = [t('schedule_title', 'ru', game_name=game_day.display_name)]
+    if not scheduled:
+        lines.append(t('schedule_empty', 'ru'))
+    else:
+        for m in scheduled:
+            st = status_emoji.get(m.status.value if hasattr(m.status, 'value') else m.status, "❓")
+            lines.append(
+                f"{m.match_order}. {st} {m.team_home.color_emoji} <b>{m.team_home.name}</b>"
+                f" vs {m.team_away.color_emoji} <b>{m.team_away.name}</b>"
+                + (f" — {m.score_home}:{m.score_away}" if m.status != MatchStatus.SCHEDULED else "")
+            )
+
+    # Проверяем наличие команд
+    teams_res = await session.execute(
+        select(Team).where(Team.game_day_id == game_day_id)
+    )
+    teams = teams_res.scalars().all()
+
+    builder = InlineKeyboardBuilder()
+    if len(teams) >= 2:
+        builder.row(InlineKeyboardButton(
+            text="➕ Добавить матч в расписание",
+            callback_data=f"gd_sched_add:{game_day_id}"
+        ))
+        # Авто-сгенерировать расписание (round-robin)
+        if not scheduled and len(teams) >= 2:
+            builder.row(InlineKeyboardButton(
+                text="🎲 Авто-расписание (round-robin)",
+                callback_data=f"gd_sched_auto:{game_day_id}"
+            ))
+    else:
+        lines.append("\n⚠️ Сначала создай команды через «🎲 Создать команды».")
+
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data=f"gd_players:{game_day_id}"
+    ))
+
+    await call.message.edit_text("\n".join(lines), reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("gd_sched_add:"))
+async def gd_sched_add_start(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    """Начало добавления матча в расписание — выбор команды 1."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    await state.update_data(game_day_id=game_day_id)
+
+    teams_res = await session.execute(
+        select(Team).where(Team.game_day_id == game_day_id)
+    )
+    teams = teams_res.scalars().all()
+
+    builder = InlineKeyboardBuilder()
+    for team in teams:
+        builder.row(InlineKeyboardButton(
+            text=f"{team.color_emoji} {team.name}",
+            callback_data=f"gd_sched_t1:{team.id}"
+        ))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"gd_schedule:{game_day_id}"))
+
+    await state.set_state(ScheduleFSM.waiting_team1)
+    await call.message.edit_text(
+        t('schedule_add_title', 'ru'),
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("gd_sched_t1:"), StateFilter(ScheduleFSM.waiting_team1))
+async def gd_sched_pick_team1(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await call.answer()
+    team1_id = int(call.data.split(":")[1])
+    team1 = await session.get(Team, team1_id)
+    if not team1:
+        await call.answer("❌ Команда не найдена.", show_alert=True)
+        return
+
+    await state.update_data(team1_id=team1_id, team1_name=team1.name)
+    data = await state.get_data()
+    game_day_id = data["game_day_id"]
+
+    # Показываем команды кроме выбранной
+    teams_res = await session.execute(
+        select(Team).where(Team.game_day_id == game_day_id, Team.id != team1_id)
+    )
+    teams = teams_res.scalars().all()
+
+    builder = InlineKeyboardBuilder()
+    for team in teams:
+        builder.row(InlineKeyboardButton(
+            text=f"{team.color_emoji} {team.name}",
+            callback_data=f"gd_sched_t2:{team.id}"
+        ))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"gd_schedule:{game_day_id}"))
+
+    await state.set_state(ScheduleFSM.waiting_team2)
+    await call.message.edit_text(
+        t('schedule_pick_team2', 'ru', team1=team1.name),
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("gd_sched_t2:"), StateFilter(ScheduleFSM.waiting_team2))
+async def gd_sched_pick_team2(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await call.answer()
+    team2_id = int(call.data.split(":")[1])
+    team2 = await session.get(Team, team2_id)
+    if not team2:
+        await call.answer("❌ Команда не найдена.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    game_day_id = data["game_day_id"]
+    team1_id = data["team1_id"]
+    team1_name = data["team1_name"]
+
+    # Определяем следующий номер в расписании
+    count_res = await session.execute(
+        select(Match).where(Match.game_day_id == game_day_id, Match.match_order > 0)
+    )
+    existing = count_res.scalars().all()
+    next_order = max((m.match_order for m in existing), default=0) + 1
+
+    # Достаём настройки игрового дня
+    game_day = await session.get(GameDay, game_day_id)
+
+    # Создаём матч в расписании
+    new_match = Match(
+        game_day_id=game_day_id,
+        team_home_id=team1_id,
+        team_away_id=team2_id,
+        match_order=next_order,
+        status=MatchStatus.SCHEDULED,
+        match_format=game_day.match_format if game_day else "time",
+        duration_min=game_day.match_duration_min if game_day else 20,
+        goals_to_win=game_day.goals_to_win if game_day else 3,
+        match_stage="group",
+    )
+    session.add(new_match)
+    await session.commit()
+
+    await call.message.edit_text(
+        t('schedule_added', 'ru', num=next_order) + f"\n\n{next_order}. {team1_name} vs {team2.name}",
+        reply_markup=InlineKeyboardBuilder().row(
+            InlineKeyboardButton(text="📅 Назад к расписанию", callback_data=f"gd_schedule:{game_day_id}")
+        ).as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("gd_sched_auto:"))
+async def gd_sched_auto(call: CallbackQuery, session: AsyncSession):
+    """Авто-генерация расписания round-robin из всех команд."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("⏳ Генерирую расписание...")
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+
+    teams_res = await session.execute(
+        select(Team).where(Team.game_day_id == game_day_id)
+    )
+    teams = teams_res.scalars().all()
+
+    if len(teams) < 2:
+        await call.answer("⚠️ Нужно минимум 2 команды.", show_alert=True)
+        return
+
+    # Round-robin: каждая команда играет с каждой по одному разу
+    order = 0
+    for i in range(len(teams)):
+        for j in range(i + 1, len(teams)):
+            order += 1
+            new_match = Match(
+                game_day_id=game_day_id,
+                team_home_id=teams[i].id,
+                team_away_id=teams[j].id,
+                match_order=order,
+                status=MatchStatus.SCHEDULED,
+                match_format=game_day.match_format if game_day else "time",
+                duration_min=game_day.match_duration_min if game_day else 20,
+                goals_to_win=game_day.goals_to_win if game_day else 3,
+                match_stage="group",
+            )
+            session.add(new_match)
+
+    await session.commit()
+
+    await call.message.edit_text(
+        f"✅ Создано <b>{order}</b> матчей по системе round-robin!\n\n"
+        "Судья увидит их в своей панели и сможет запускать по порядку.",
+        reply_markup=InlineKeyboardBuilder().row(
+            InlineKeyboardButton(text="📅 Посмотреть расписание", callback_data=f"gd_schedule:{game_day_id}")
+        ).as_markup()
     )

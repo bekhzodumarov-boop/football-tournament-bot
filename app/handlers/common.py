@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import (
     Player, POSITION_LABELS,
-    GameDay, GameDayStatus, Match, MatchStatus, Team, League,
+    GameDay, GameDayStatus, Match, MatchStatus, Team, TeamPlayer, League,
+    Goal, GoalType, Card, CardType,
 )
 from app.keyboards.main_menu import main_menu_kb, admin_menu_kb, language_kb
 from app.locales.texts import t
@@ -311,19 +312,41 @@ async def cb_my_stats(call: CallbackQuery, player: Player | None, session: Async
 
     lang = getattr(player, 'language', None) or 'ru'
 
-    from sqlalchemy import select, func
-    from app.database.models import Goal
+    from sqlalchemy import func
 
     # Голы
     goals_result = await session.execute(
-        select(func.count(Goal.id)).where(Goal.player_id == player.id)
+        select(func.count(Goal.id)).where(
+            Goal.player_id == player.id,
+            Goal.goal_type == GoalType.GOAL
+        )
     )
     total_goals = goals_result.scalar() or 0
+
+    # Жёлтые карточки
+    yellow_result = await session.execute(
+        select(func.count(Card.id)).where(
+            Card.player_id == player.id,
+            Card.card_type == CardType.YELLOW
+        )
+    )
+    yellow_cards = yellow_result.scalar() or 0
+
+    # Красные карточки
+    red_result = await session.execute(
+        select(func.count(Card.id)).where(
+            Card.player_id == player.id,
+            Card.card_type == CardType.RED
+        )
+    )
+    red_cards = red_result.scalar() or 0
 
     text = t('my_stats_title', lang,
              name=player.name,
              games=player.games_played,
              goals=total_goals,
+             yellow_cards=yellow_cards,
+             red_cards=red_cards,
              reliability=f"{player.reliability_pct:.0f}",
              rating=f"{player.rating:.1f}")
     await call.message.edit_text(text, reply_markup=main_menu_kb(lang))
@@ -452,3 +475,164 @@ async def cb_set_language(call: CallbackQuery, player: Player | None, session: A
         await session.commit()
     key = 'lang_set_ru' if new_lang == 'ru' else 'lang_set_en'
     await call.message.answer(t(key, new_lang), reply_markup=main_menu_kb(new_lang))
+
+
+# ── My Team (I-040) ──────────────────────────────────────────────────────────
+
+@router.message(Command("myteam"))
+async def cmd_myteam(message: Message, player: Player | None, session: AsyncSession):
+    if not player:
+        await message.answer("Ты не зарегистрирован. Нажми /register")
+        return
+    lang = getattr(player, 'language', None) or 'ru'
+    await _show_myteam(message, player, session, lang, send_fn=message.answer)
+
+
+@router.callback_query(lambda c: c.data == "my_team")
+async def cb_my_team(call: CallbackQuery, player: Player | None, session: AsyncSession):
+    await call.answer()
+    if not player:
+        await call.message.answer("Ты не зарегистрирован.")
+        return
+    lang = getattr(player, 'language', None) or 'ru'
+    await _show_myteam(call.message, player, session, lang, send_fn=call.message.edit_text)
+
+
+async def _show_myteam(msg, player: Player, session, lang: str, send_fn):
+    """Показывает команду игрока на ближайший активный игровой день."""
+    # Ищем ближайший активный игровой день в лиге
+    gd_result = await session.execute(
+        select(GameDay)
+        .where(
+            GameDay.status.in_([GameDayStatus.ANNOUNCED, GameDayStatus.CLOSED, GameDayStatus.IN_PROGRESS]),
+            GameDay.league_id == player.league_id
+        )
+        .order_by(GameDay.scheduled_at)
+        .limit(1)
+    )
+    game_day = gd_result.scalar_one_or_none()
+
+    if not game_day:
+        await send_fn(t('myteam_no_game', lang), reply_markup=main_menu_kb(lang))
+        return
+
+    # Ищем команду игрока в этом игровом дне
+    tp_result = await session.execute(
+        select(TeamPlayer)
+        .options(
+            selectinload(TeamPlayer.team).selectinload(Team.players).selectinload(TeamPlayer.player)
+        )
+        .join(Team, TeamPlayer.team_id == Team.id)
+        .where(
+            TeamPlayer.player_id == player.id,
+            Team.game_day_id == game_day.id
+        )
+    )
+    my_tp = tp_result.scalar_one_or_none()
+
+    if my_tp is None:
+        # Проверим: есть ли вообще команды для этого дня
+        teams_count = await session.execute(
+            select(Team).where(Team.game_day_id == game_day.id).limit(1)
+        )
+        if teams_count.scalar_one_or_none() is None:
+            await send_fn(
+                t('myteam_no_teams', lang, game_name=game_day.display_name),
+                reply_markup=main_menu_kb(lang)
+            )
+        else:
+            await send_fn(
+                t('myteam_not_in_team', lang),
+                reply_markup=main_menu_kb(lang)
+            )
+        return
+
+    my_team = my_tp.team
+    teammates = my_team.players  # TeamPlayer list
+
+    date_str = game_day.scheduled_at.strftime("%d.%m.%Y %H:%M")
+    lines = [t('myteam_title', lang,
+               game_name=game_day.display_name,
+               date=date_str,
+               location=game_day.location,
+               team_emoji=my_team.color_emoji,
+               team_name=my_team.name)]
+
+    for i, tp in enumerate(teammates, 1):
+        p = tp.player
+        if not p:
+            continue
+        pos = POSITION_LABELS.get(p.position, str(p.position))
+        marker = "👤 " if p.id == player.id else ""
+        lines.append(f"{i}. {marker}<b>{p.name}</b> — {pos}, ⭐{p.rating:.1f}")
+
+    await send_fn("\n".join(lines), reply_markup=main_menu_kb(lang))
+
+
+# ── Top Scorers (I-020) ───────────────────────────────────────────────────────
+
+@router.callback_query(lambda c: c.data == "top_scorers")
+async def cb_top_scorers(call: CallbackQuery, player: Player | None, session: AsyncSession):
+    await call.answer()
+
+    lang = getattr(player, 'language', None) or 'ru' if player else 'ru'
+    league_id = getattr(player, 'league_id', None) if player else None
+
+    from sqlalchemy import func
+
+    # Топ-10 бомбардиров в лиге (за все турниры)
+    query = (
+        select(Player.id, Player.name, func.count(Goal.id).label("goals"))
+        .join(Goal, Goal.player_id == Player.id)
+        .join(Match, Goal.match_id == Match.id)
+        .join(GameDay, Match.game_day_id == GameDay.id)
+        .where(Goal.goal_type == GoalType.GOAL)
+        .group_by(Player.id, Player.name)
+        .order_by(func.count(Goal.id).desc())
+        .limit(10)
+    )
+    if league_id:
+        query = query.where(GameDay.league_id == league_id)
+
+    result = await session.execute(query)
+    rows = result.all()
+
+    from app.locales.texts import goals_word as gw
+
+    lines = [t('top_scorers_all_time', lang)]
+    if not rows:
+        lines.append(t('top_scorers_empty', lang))
+    else:
+        medals = ["🥇", "🥈", "🥉"] + ["⚽"] * 7
+        for i, (pid, name, goals) in enumerate(rows):
+            medal = medals[i] if i < len(medals) else "⚽"
+            lines.append(f"{medal} <b>{name}</b> — {goals} {gw(goals, lang)}")
+
+    # Добавим бомбардиров последнего турнира
+    gd_result = await session.execute(
+        select(GameDay)
+        .where(GameDay.status == GameDayStatus.FINISHED)
+        .order_by(GameDay.scheduled_at.desc())
+        .limit(1)
+    )
+    last_gd = gd_result.scalar_one_or_none()
+    if last_gd:
+        scorer_q = (
+            select(Player.name, func.count(Goal.id).label("g"))
+            .join(Goal, Goal.player_id == Player.id)
+            .join(Match, Goal.match_id == Match.id)
+            .where(
+                Match.game_day_id == last_gd.id,
+                Goal.goal_type == GoalType.GOAL
+            )
+            .group_by(Player.name)
+            .order_by(func.count(Goal.id).desc())
+            .limit(5)
+        )
+        scorer_rows = (await session.execute(scorer_q)).all()
+        if scorer_rows:
+            lines.append(f"\n⚽ <b>{'Последний турнир' if lang == 'ru' else 'Last tournament'} — {last_gd.display_name}:</b>")
+            for name, g in scorer_rows:
+                lines.append(f"  • {name} — {g} {gw(g, lang)}")
+
+    await call.message.edit_text("\n".join(lines), reply_markup=main_menu_kb(lang))

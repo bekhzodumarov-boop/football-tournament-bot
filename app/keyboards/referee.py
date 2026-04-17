@@ -30,8 +30,11 @@ def referee_gd_kb(game_day_id: int, matches: list) -> InlineKeyboardMarkup:
             "third_place": "🥉 ",
             "final": "🏆🏆 ",
         }.get(stage, "")
+        # Schedule number prefix
+        match_order = getattr(match, "match_order", 0) or 0
+        order_prefix = f"#{match_order} " if match_order > 0 else ""
         builder.row(InlineKeyboardButton(
-            text=stage_prefix + text,
+            text=order_prefix + stage_prefix + text,
             callback_data=f"ref_match:{match.id}"
         ))
     builder.row(InlineKeyboardButton(

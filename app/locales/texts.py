@@ -223,7 +223,61 @@ TEXTS = {
         ),
         "score_not_set": "<i>не выбрана</i>",
 
+        # ── My Team (I-040) ───────────────────────────────────────────────
+        "myteam_no_game": "📅 Нет активных турниров.",
+        "myteam_no_teams": "⚽ Команды для <b>{game_name}</b> ещё не сформированы.\n\nОрганизатор разобьёт команды ближе к игре.",
+        "myteam_not_in_team": "🤔 Тебя нет ни в одной команде на ближайший турнир.\n\nВозможно, ты не записан или команды ещё не распределены.",
+        "myteam_title": (
+            "👥 <b>Твоя команда — {game_name}</b>\n"
+            "📅 {date} | 📍 {location}\n\n"
+            "{team_emoji} <b>{team_name}</b>\n\n"
+            "<b>Состав:</b>\n"
+        ),
+
+        # ── Top Scorers (I-020) ───────────────────────────────────────────
+        "top_scorers_title": "⚽ <b>Бомбардиры</b>\n",
+        "top_scorers_empty": "📊 Голов ещё не забито.",
+        "top_scorers_all_time": "📊 <b>Лучшие бомбардиры — все турниры</b>\n",
+
+        # ── My stats updated (I-019) ───────────────────────────────────────
+        "my_stats_title": (
+            "📊 <b>Моя статистика — {name}</b>\n\n"
+            "⚽ Игр сыграно: <b>{games}</b>\n"
+            "🥅 Голов: <b>{goals}</b>\n"
+            "🟨 Жёлтых карточек: <b>{yellow_cards}</b>\n"
+            "🟥 Красных карточек: <b>{red_cards}</b>\n"
+            "✅ Надёжность: <b>{reliability}%</b>\n"
+            "⭐ Рейтинг: <b>{rating}</b>"
+        ),
+
+        # ── Match Schedule (I-042) ─────────────────────────────────────────
+        "schedule_title": "📅 <b>Расписание матчей — {game_name}</b>\n",
+        "schedule_empty": "📋 Расписание ещё не создано.\n\nДобавь матчи по кнопке ниже.",
+        "schedule_match_row": "{num}. {emoji1} {team1} vs {emoji2} {team2}",
+        "schedule_add_title": "📅 <b>Добавить матч в расписание</b>\n\nШаг 1: выбери <b>Команду 1</b>:",
+        "schedule_pick_team2": "✅ Команда 1: <b>{team1}</b>\n\nШаг 2: выбери <b>Команду 2</b>:",
+        "schedule_added": "✅ Матч добавлен в расписание под номером <b>#{num}</b>.",
+        "schedule_started": "▶️ Матч <b>{num}</b> начат!",
+        "schedule_all_done": "🏁 Все матчи из расписания сыграны!",
+
+        # ── Post Results (I-013) ───────────────────────────────────────────
+        "results_broadcast_header": (
+            "🏁 <b>Итоги {game_name}</b>\n\n"
+        ),
+        "results_broadcast_sent": "✅ Итоги турнира разосланы <b>{count}</b> игрокам.",
+        "results_broadcast_empty": "⚠️ Нет завершённых матчей для рассылки.",
+
+        # ── Channel Post (I-043) ───────────────────────────────────────────
+        "channel_posted": "✅ Итоги опубликованы в канале.",
+        "channel_not_set": (
+            "⚠️ Канал не настроен.\n\n"
+            "Добавь переменную CHANNEL_ID в настройки Railway\n"
+            "<i>(например: @mychannel или -1001234567890)</i>"
+        ),
+
         # ── Buttons ───────────────────────────────────────────────────────
+        "btn_my_team": "👥 Моя команда",
+        "btn_top_scorers": "⚽ Бомбардиры",
         "btn_upcoming_game": "📅 Ближайшая игра",
         "btn_standings": "🏆 Таблица турнира",
         "btn_my_stats": "📊 Моя статистика",
@@ -421,7 +475,36 @@ TEXTS = {
         ),
         "score_not_set": "<i>not set</i>",
 
+        # ── My Team / Stats (EN) ─────────────────────────────────────────
+        "myteam_no_game": "📅 No active tournaments.",
+        "myteam_no_teams": "⚽ Teams for <b>{game_name}</b> haven't been set yet.",
+        "myteam_not_in_team": "🤔 You're not in any team for the nearest tournament.",
+        "myteam_title": (
+            "👥 <b>Your Team — {game_name}</b>\n"
+            "📅 {date} | 📍 {location}\n\n"
+            "{team_emoji} <b>{team_name}</b>\n\n"
+            "<b>Roster:</b>\n"
+        ),
+        "top_scorers_title": "⚽ <b>Top Scorers</b>\n",
+        "top_scorers_empty": "📊 No goals scored yet.",
+        "top_scorers_all_time": "📊 <b>All-Time Top Scorers</b>\n",
+        "my_stats_title": (
+            "📊 <b>My Stats — {name}</b>\n\n"
+            "⚽ Games played: <b>{games}</b>\n"
+            "🥅 Goals: <b>{goals}</b>\n"
+            "🟨 Yellow cards: <b>{yellow_cards}</b>\n"
+            "🟥 Red cards: <b>{red_cards}</b>\n"
+            "✅ Reliability: <b>{reliability}%</b>\n"
+            "⭐ Rating: <b>{rating}</b>"
+        ),
+        "results_broadcast_sent": "✅ Results sent to <b>{count}</b> players.",
+        "results_broadcast_empty": "⚠️ No finished matches to broadcast.",
+        "channel_posted": "✅ Results published to channel.",
+        "channel_not_set": "⚠️ Channel not configured. Set CHANNEL_ID in Railway settings.",
+
         # ── Buttons ───────────────────────────────────────────────────────
+        "btn_my_team": "👥 My Team",
+        "btn_top_scorers": "⚽ Scorers",
         "btn_upcoming_game": "📅 Upcoming Game",
         "btn_standings": "🏆 Standings",
         "btn_my_stats": "📊 My Stats",

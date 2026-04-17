@@ -241,6 +241,7 @@ class Match(Base):
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     match_stage: Mapped[Optional[str]] = mapped_column(String(20), default="group", nullable=True)
+    match_order: Mapped[int] = mapped_column(Integer, default=0)  # порядок в расписании (0 = вне расписания)
 
     game_day: Mapped["GameDay"] = relationship(back_populates="matches")
     team_home: Mapped["Team"] = relationship(foreign_keys=[team_home_id])

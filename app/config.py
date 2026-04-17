@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # Telegram username бота (без @) — нужен для генерации инвайт-ссылок
     BOT_USERNAME: str = "football_manager_2026_bot"
 
+    # Telegram channel ID для публикации итогов (например: @mychannel или -1001234567890)
+    CHANNEL_ID: str = ""
+
     # Google Sheets — JSON-строка сервисного аккаунта и ID таблицы
     GOOGLE_CREDENTIALS_JSON: str = ""
     GOOGLE_SHEET_ID: str = ""

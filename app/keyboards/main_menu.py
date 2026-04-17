@@ -11,6 +11,10 @@ def main_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
         InlineKeyboardButton(text=t("btn_upcoming_game", lang), callback_data="next_game"),
     )
     builder.row(
+        InlineKeyboardButton(text=t("btn_my_team", lang), callback_data="my_team"),
+        InlineKeyboardButton(text=t("btn_top_scorers", lang), callback_data="top_scorers"),
+    )
+    builder.row(
         InlineKeyboardButton(text=t("btn_my_stats", lang), callback_data="my_stats"),
         InlineKeyboardButton(text=t("btn_players_list", lang), callback_data="players_list"),
     )

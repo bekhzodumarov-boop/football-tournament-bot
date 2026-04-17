@@ -113,6 +113,10 @@ async def _run_migrations(conn):
             await conn.execute(text(
                 "ALTER TABLE players ADD COLUMN gender VARCHAR(1) NOT NULL DEFAULT 'm'"
             ))
+        if "match_order" not in match_cols2:
+            await conn.execute(text(
+                "ALTER TABLE matches ADD COLUMN match_order INTEGER DEFAULT 0"
+            ))
     else:
         # PostgreSQL
         await conn.execute(text(
@@ -150,6 +154,9 @@ async def _run_migrations(conn):
         ))
         await conn.execute(text(
             "ALTER TABLE players ADD COLUMN IF NOT EXISTS gender VARCHAR(1) DEFAULT 'm' NOT NULL"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE matches ADD COLUMN IF NOT EXISTS match_order INTEGER DEFAULT 0"
         ))
 
 

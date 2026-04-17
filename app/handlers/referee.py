@@ -275,13 +275,23 @@ async def ref_select_gameday(call: CallbackQuery, session: AsyncSession,
         select(Match)
         .options(selectinload(Match.team_home), selectinload(Match.team_away))
         .where(Match.game_day_id == game_day_id)
-        .order_by(Match.id)
+        .order_by(Match.match_order, Match.id)
     )
     matches = result.scalars().all()
 
+    # Показываем подсказку о расписании если оно есть
+    scheduled = [m for m in matches if m.match_order > 0 and m.status == MatchStatus.SCHEDULED]
+    schedule_hint = ""
+    if scheduled:
+        next_m = scheduled[0]
+        schedule_hint = (
+            f"\n\n📅 <b>Следующий по расписанию:</b>\n"
+            f"#{next_m.match_order} {next_m.team_home.name} vs {next_m.team_away.name}"
+        )
+
     await call.message.edit_text(
         f"🦺 <b>Игровой день {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}</b>\n"
-        f"📍 {game_day.location}\n\nВыбери матч или создай новый:",
+        f"📍 {game_day.location}\n\nВыбери матч или создай новый:{schedule_hint}",
         reply_markup=referee_gd_kb(game_day_id, matches)
     )
 
