@@ -23,9 +23,11 @@ def t_g(key: str, lang: str = "ru", gender: str = "m", **kwargs) -> str:
 
 
 def goals_word(count: int, lang: str = "ru") -> str:
-    """Return correct plural form of 'goal' / 'гол'."""
+    """Return correct plural form of 'goal' / 'гол' / 'gol'."""
     if lang == "en":
         return "goal" if count == 1 else "goals"
+    if lang == "uz":
+        return "gol"  # Uzbek has no grammatical plural distinction here
     # Russian pluralization
     if count % 100 in range(11, 20):
         return "голов"
@@ -533,5 +535,252 @@ TEXTS = {
         "pos_def": "🛡 Defender",
         "pos_mid": "⚙️ Midfielder",
         "pos_fwd": "⚡ Forward",
+    },
+
+    "uz": {
+        # ── Registration ──────────────────────────────────────────────────
+        "reg_welcome": (
+            "👋 Salom! <b>Football Manager Bot</b>ga xush kelibsiz!\n\n"
+            "Siz hali ro'yxatdan o'tmagansiz. Keling, buni tuzatamiz!\n\n"
+            "Profil yaratish uchun /register ni bosing."
+        ),
+        "reg_start": (
+            "👤 <b>Ro'yxatdan o'tish</b>\n\n"
+            "1-qadam / 3\n\n"
+            "Ismingiz nima?\n"
+            "<i>Ism va familiyangizni kiriting, masalan: Jasur Karimov</i>"
+        ),
+        "reg_name_too_short": "❌ Ism juda qisqa. Kamida 2 ta belgi kiriting:",
+        "reg_choose_position": (
+            "✅ Ism: <b>{name}</b>\n\n"
+            "2-qadam / 3\n\n"
+            "O'z pozitsiyangizni tanlang:"
+        ),
+        "reg_choose_rating": (
+            "✅ Pozitsiya: <b>{position}</b>\n\n"
+            "3-qadam / 3\n\n"
+            "O'z darajangizni 1 dan 10 gacha baholang:\n"
+            "<i>1 — yangi boshlovchi, 10 — professional</i>"
+        ),
+        "reg_invalid_rating": "❌ 1 dan 10 gacha son kiriting:",
+        "reg_complete": (
+            "🎉 <b>Ro'yxatdan o'tish yakunlandi!</b>\n\n"
+            "👤 Ism: <b>{name}</b>\n"
+            "{position}\n"
+            "⭐ Boshlang'ich reyting: <b>{rating}</b>\n\n"
+            "Ligaga xush kelibsiz! ⚽"
+        ),
+        "reg_already": "✅ Siz allaqachon ro'yxatdan o'tgansiz! Asosiy menyu uchun /start ni bosing.",
+        "choose_gender": (
+            "👤 <b>Sizga qanday murojaat qilaylik?</b>\n\n"
+            "Bu bot sizga to'g'ri murojaat qilishi uchun kerak."
+        ),
+        "gender_set": "✅ Tayyor! Murojaat shakli saqlandi.",
+        "choose_language": "🌐 <b>Выбери язык / Choose language / Til tanlang:</b>",
+        "lang_set_ru": "✅ Язык изменён на Русский 🇷🇺",
+        "lang_set_en": "✅ Language changed to English 🇬🇧",
+        "lang_set_uz": "✅ Til o'zbek tiliga o'zgartirildi 🇺🇿",
+
+        # ── Main menu ────────────────────────────────────────────────────
+        "main_menu_greeting": (
+            "⚽ Salom, <b>{name}</b>!\n\n"
+            "📍 Pozitsiya: {position}\n"
+            "⭐ Reyting: {rating}{provisional}\n"
+            "💰 Balans: {balance} so'm.\n\n"
+            "Amalni tanlang:"
+        ),
+        "provisional_label": " <i>(vaqtinchalik)</i>",
+        "no_league_hint": "\n\n💡 <i>Sizda liga yo'q. /create_league — o'z ligangizni yarating!</i>",
+
+        # ── Profile ───────────────────────────────────────────────────────
+        "profile_title": (
+            "👤 <b>O'yinchi profili</b>\n\n"
+            "Ism: <b>{name}</b>\n"
+            "Pozitsiya: {position}\n"
+            "⭐ Reyting: <b>{rating}</b>{provisional}\n"
+            "✅ Ishonchlilik: <b>{reliability}%</b>\n"
+            "⚽ O'yinlar: <b>{games}</b>\n"
+            "💰 Balans: <b>{balance} so'm</b>"
+        ),
+
+        # ── Standings / stats ─────────────────────────────────────────────
+        "standings_empty": "🏆 <b>Turnir jadvali</b>\n\nHali ma'lumot yo'q.",
+        "standings_title": "🏆 <b>Turnir jadvali</b> — {date}",
+        "standings_no_matches": "Hali o'yin o'ynalmagan.",
+        "standings_recent": "\n<b>So'nggi natijalar:</b>",
+        "standings_upcoming": "\n<b>Kelgusi o'yinlar:</b>",
+        "my_stats_title": (
+            "📊 <b>Mening statistikam — {name}</b>\n\n"
+            "⚽ O'ynalgan o'yinlar: <b>{games}</b>\n"
+            "🥅 Gollar: <b>{goals}</b>\n"
+            "🟨 Sariq kartochkalar: <b>{yellow_cards}</b>\n"
+            "🟥 Qizil kartochkalar: <b>{red_cards}</b>\n"
+            "✅ Ishonchlilik: <b>{reliability}%</b>\n"
+            "⭐ Reyting: <b>{rating}</b>"
+        ),
+        "results_empty": "📋 Hali yakunlangan o'yinlar yo'q.",
+        "results_title": "📋 <b>O'yin natijalari</b>\n",
+        "no_players": "👥 Hali o'yinchilar yo'q.",
+        "players_title": "👥 <b>Barcha o'yinchilar</b>\n",
+
+        # ── Attendance ────────────────────────────────────────────────────
+        "join_success": (
+            "✅ <b>Siz o'yinga yozildingiz!</b>\n\n"
+            "📅 {date}\n"
+            "📍 {location}\n\n"
+            "Bot boshlanishdan 2 soat oldin eslatib qo'yadi."
+        ),
+        "join_waitlist": (
+            "⏳ Joy yo'q — siz kutish ro'yxatidasiz <b>#{position}</b>.\n\n"
+            "Biror kishi voz kechganda, siz xabardor bo'lasiz."
+        ),
+        "join_declined": "❌ Siz ishtirokdan voz kechdingiz.\n\nFikringiz o'zgardimi? Qayta yozilib oling.",
+        "confirm_reminder": (
+            "⏰ <b>Eslatma!</b>\n\n"
+            "O'yin 2 soatdan keyin!\n"
+            "📅 {date}\n"
+            "📍 {location}\n\n"
+            "Qatnashishingizni tasdiqlang:"
+        ),
+        "confirm_yes_response": "✅ Ajoyib! O'yinda ko'rishguncha 💪",
+        "confirm_no_response": "😔 Afsuski! Sizning joyingiz keyingi o'yinchiga berildi.",
+        "confirm_late_response": "⏰ Tushundim, kechikasiz. Ulgurishga harakat qiling!",
+        "waitlist_promoted": (
+            "🎉 <b>Joy bo'shadi!</b>\n\n"
+            "Siz kutish ro'yxatidan asosiy tarkibga o'tkazildingiz!\n\n"
+            "📅 {date}\n"
+            "📍 {location}"
+        ),
+
+        # ── Match result broadcast ────────────────────────────────────────
+        "match_result_text": (
+            "🏁 <b>Yakuniy hisob</b>\n\n"
+            "⚽ <b>{home}  {score_home} : {score_away}  {away}</b>\n"
+        ),
+        "match_cards_header": "\n\n<b>Kartochkalar:</b>",
+
+        # ── Finance broadcast ──────────────────────────────────────────────
+        "finance_notice": (
+            "💰 <b>{game_name} uchun to'lov</b>\n\n"
+            "📅 {date}\n"
+            "📍 {location}\n\n"
+            "💵 To'lov miqdori: <b>{amount} so'm</b>\n\n"
+            "Iltimos, to'lovni tashkilotchiga amalga oshiring. Rahmat! 🙏"
+        ),
+
+        # ── Team assignment ───────────────────────────────────────────────
+        "team_assigned": (
+            "⚽ <b>{game_name} uchun jamoalar tuzildi!</b>\n\n"
+            "Jamoalar reyting va pozitsiyalar bo'yicha teng taqsimlandi.\n\n"
+            "Siz bugun <b>{team_color} {team_name}</b> jamoasida o'ynaysiz.\n\n"
+            "Jamoangiz: <b>{teammates}</b>\n\n"
+            "Omad! 🏆"
+        ),
+
+        # ── Tournament results ────────────────────────────────────────────
+        "tournament_results_header": "🏆 <b>Turnir yakunlari — {game_name}</b>\n",
+        "place_1": "🥇 1-o'rin",
+        "place_2": "🥈 2-o'rin",
+        "place_3": "🥉 3-o'rin",
+        "place_4": "❤️ Tomoshabinlar sevimli (4-o'rin)",
+        "top_scorer": "\n⚽ <b>Eng ko'p gol urgan:</b> {name} ({count} {goals_word})",
+        "best_player": "⭐ <b>Eng yaxshi o'yinchi:</b> {name}",
+        "tournament_thanks": "\n🙏 O'ynaganlarga rahmat! Keyingi turnirda ko'rishguncha!",
+
+        # ── Rating voting ─────────────────────────────────────────────────
+        "rating_invite": (
+            "⭐ <b>Reyting ovoz berish!</b>\n\n"
+            "Boshqa o'yinchilarni 1 dan 10 gacha baholang.\n"
+            "Sizning baholaringiz ishtirokchilar reytingiga ta'sir qiladi.\n\n"
+            "<i>1-2 daqiqa vaqt oladi</i>"
+        ),
+        "rating_invite_gameday": (
+            "⭐ <b>O'yinchilarni baholang!</b>\n\n"
+            "Jamoalarga bo'linishdan oldin ({game_name}) ishtirokchilarni 1 dan 10 gacha baholang.\n\n"
+            "Bu 1–2 daqiqa vaqt oladi va jamoalarni tenglashtirish uchun yordam beradi."
+        ),
+        "rating_voted": (
+            "✅ <b>Ovozlar yuborildi!</b>\n\n"
+            "Siz {count} ta o'yinchini baholadingiz.\n"
+            "Rahmat! Natijalar raund tugagandan keyin qo'llaniladi. 🙏"
+        ),
+        "rating_vote_nominee": (
+            "⭐ <b>Ovoz berish</b> — {current}/{total}\n\n"
+            "👤 <b>{name}</b>\n\n"
+            "Sizning bahongiz: <b>{score}</b>\n\n"
+            "<i>1 (zaif) dan 10 (a'lo) gacha baholang</i>"
+        ),
+        "score_not_set": "<i>tanlanmagan</i>",
+
+        # ── My Team (I-040) ───────────────────────────────────────────────
+        "myteam_no_game": "📅 Faol turnirlar yo'q.",
+        "myteam_no_teams": "⚽ <b>{game_name}</b> uchun jamoalar hali tuzilmagan.\n\nTashkilotchi o'yin oldidan jamoalarni taqsimlab beradi.",
+        "myteam_not_in_team": "🤔 Siz yaqin turnir uchun hech qaysi jamoada yo'qsiz.\n\nEhtimol, yozilmagansiz yoki jamoalar hali taqsimlanmagan.",
+        "myteam_title": (
+            "👥 <b>Sizning jamoangiz — {game_name}</b>\n"
+            "📅 {date} | 📍 {location}\n\n"
+            "{team_emoji} <b>{team_name}</b>\n\n"
+            "<b>Tarkib:</b>\n"
+        ),
+
+        # ── Top Scorers (I-020) ───────────────────────────────────────────
+        "top_scorers_title": "⚽ <b>Bombardirlar</b>\n",
+        "top_scorers_empty": "📊 Hali gol urilmagan.",
+        "top_scorers_all_time": "📊 <b>Eng yaxshi bombardirlar — barcha turnirlar</b>\n",
+
+        # ── Match Schedule (I-042) ─────────────────────────────────────────
+        "schedule_title": "📅 <b>O'yinlar jadvali — {game_name}</b>\n",
+        "schedule_empty": "📋 Jadval hali tuzilmagan.\n\nQuyidagi tugma orqali o'yinlar qo'shing.",
+        "schedule_match_row": "{num}. {emoji1} {team1} vs {emoji2} {team2}",
+        "schedule_add_title": "📅 <b>Jadvalga o'yin qo'shish</b>\n\n1-qadam: <b>1-jamoani</b> tanlang:",
+        "schedule_pick_team2": "✅ 1-jamoa: <b>{team1}</b>\n\n2-qadam: <b>2-jamoani</b> tanlang:",
+        "schedule_added": "✅ O'yin jadvalga <b>#{num}</b> raqami ostida qo'shildi.",
+        "schedule_started": "▶️ <b>{num}</b>-o'yin boshlandi!",
+        "schedule_all_done": "🏁 Jadvaldan barcha o'yinlar o'ynaldi!",
+
+        # ── Post Results (I-013) ───────────────────────────────────────────
+        "results_broadcast_header": "🏁 <b>{game_name} yakunlari</b>\n\n",
+        "results_broadcast_sent": "✅ Turnir yakunlari <b>{count}</b> ta o'yinchiga yuborildi.",
+        "results_broadcast_empty": "⚠️ Yuborish uchun yakunlangan o'yinlar yo'q.",
+
+        # ── Channel Post (I-043) ───────────────────────────────────────────
+        "channel_posted": "✅ Yakunlar kanalda e'lon qilindi.",
+        "channel_not_set": (
+            "⚠️ Kanal sozlanmagan.\n\n"
+            "Railway sozlamalarida CHANNEL_ID o'zgaruvchisini qo'shing\n"
+            "<i>(masalan: @mychannel yoki -1001234567890)</i>"
+        ),
+
+        # ── Buttons ───────────────────────────────────────────────────────
+        "btn_my_team": "👥 Mening jamoam",
+        "btn_top_scorers": "⚽ Bombardirlar",
+        "btn_upcoming_game": "📅 Yaqin o'yin",
+        "btn_standings": "🏆 Turnir jadvali",
+        "btn_my_stats": "📊 Statistikam",
+        "btn_players_list": "👥 O'yinchilar",
+        "btn_results": "📋 O'yin natijalari",
+        "btn_rules": "📜 Nizom",
+        "btn_language": "🌐 Til / Language",
+        "btn_profile": "👤 Mening profilim",
+        "btn_rate_players": "⭐ O'yinchilarni baholash",
+        "btn_back": "🔙 Orqaga",
+        "btn_confirm_yes": "✅ Ha, boraman!",
+        "btn_confirm_no": "❌ Bora olmayman",
+        "btn_confirm_late": "⏰ Kechikaman",
+        "btn_register": "✅ Roziman, yozilish",
+        "btn_cancel_reg": "❌ Bekor qilish",
+        "btn_read_rules": "📜 Nizomni o'qish",
+        "btn_join": "✅ Yozilish",
+        "btn_decline": "❌ Bormayman",
+        "btn_rate_players_start": "⭐ O'yinchilarni baholash",
+        "btn_vote_prev": "◀️ Orqaga",
+        "btn_vote_next": "▶️ Keyingi",
+        "btn_vote_submit": "✅ Ovozlarni yuborish",
+
+        # ── Position labels ───────────────────────────────────────────────
+        "pos_gk": "🧤 Darvozabon",
+        "pos_def": "🛡 Himoyachi",
+        "pos_mid": "⚙️ Yarim himoyachi",
+        "pos_fwd": "⚡ Hujumchi",
     },
 }
