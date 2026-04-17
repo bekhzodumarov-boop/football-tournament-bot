@@ -49,19 +49,24 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
     game_day_id = int(call.data.split(":")[1])
 
     game_day = await session.get(GameDay, game_day_id)
-    result = await session.execute(
+
+    all_att_result = await session.execute(
         select(Attendance)
         .options(selectinload(Attendance.player))
         .where(
             Attendance.game_day_id == game_day_id,
-            Attendance.response == AttendanceResponse.YES
+            Attendance.response.in_([AttendanceResponse.YES, AttendanceResponse.WAITLIST])
         )
+        .order_by(Attendance.responded_at)
     )
-    attendances = result.scalars().all()
+    all_att = all_att_result.scalars().all()
+
+    attendances = [a for a in all_att if a.response == AttendanceResponse.YES]
+    waitlist = [a for a in all_att if a.response == AttendanceResponse.WAITLIST]
 
     gd_name = game_day.display_name if game_day else f"#{game_day_id}"
 
-    if not attendances:
+    if not attendances and not waitlist:
         await call.message.edit_text(
             f"📋 <b>{gd_name}</b>\n\n📭 Никто ещё не записался.",
             reply_markup=game_day_action_kb(game_day_id)
@@ -69,15 +74,23 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
         return
 
     from app.database.models import POSITION_LABELS
-    lines = [f"📋 <b>{gd_name}</b>\n👥 Записались ({len(attendances)}):\n"]
+
+    def _player_line(p):
+        if p.username:
+            return f' <a href="https://t.me/{p.username}">@{p.username}</a>'
+        return f' <a href="tg://user?id={p.telegram_id}">💬</a>'
+
+    lines = [f"📋 <b>{gd_name}</b>\n👥 Записались ({len(attendances)}/{game_day.player_limit if game_day else '?'}):\n"]
     for i, att in enumerate(attendances, 1):
         p = att.player
         pos = POSITION_LABELS.get(p.position, p.position)
-        if p.username:
-            tg_ref = f' <a href="https://t.me/{p.username}">@{p.username}</a>'
-        else:
-            tg_ref = f' <a href="tg://user?id={p.telegram_id}">💬</a>'
-        lines.append(f"{i}. <b>{p.name}</b>{tg_ref} — {pos}, ⭐{p.rating:.1f}")
+        lines.append(f"{i}. <b>{p.name}</b>{_player_line(p)} — {pos}, ⭐{p.rating:.1f}")
+
+    if waitlist:
+        lines.append(f"\n⏳ <b>Лист ожидания ({len(waitlist)}):</b>")
+        for i, att in enumerate(waitlist, 1):
+            p = att.player
+            lines.append(f"{i}. {p.name}{_player_line(p)}")
 
     action_kb = game_day_action_kb(game_day_id)
     # Inject "kick player" button into the action keyboard
