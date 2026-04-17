@@ -468,12 +468,15 @@ async def cb_language_menu(call: CallbackQuery, player: Player | None):
 async def cb_set_language(call: CallbackQuery, player: Player | None, session: AsyncSession):
     await call.answer()
     new_lang = call.data.split(":")[1]
-    if new_lang not in ('ru', 'en', 'uz'):
+    if new_lang not in ('ru', 'en', 'uz', 'de'):
         return
     if player:
         player.language = new_lang
         await session.commit()
-    key = {'ru': 'lang_set_ru', 'en': 'lang_set_en', 'uz': 'lang_set_uz'}.get(new_lang, 'lang_set_ru')
+    key = {
+        'ru': 'lang_set_ru', 'en': 'lang_set_en',
+        'uz': 'lang_set_uz', 'de': 'lang_set_de',
+    }.get(new_lang, 'lang_set_ru')
     await call.message.answer(t(key, new_lang), reply_markup=main_menu_kb(new_lang))
 
 

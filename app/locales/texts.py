@@ -28,6 +28,8 @@ def goals_word(count: int, lang: str = "ru") -> str:
         return "goal" if count == 1 else "goals"
     if lang == "uz":
         return "gol"  # Uzbek has no grammatical plural distinction here
+    if lang == "de":
+        return "Tor" if count == 1 else "Tore"
     # Russian pluralization
     if count % 100 in range(11, 20):
         return "голов"
@@ -782,5 +784,253 @@ TEXTS = {
         "pos_def": "🛡 Himoyachi",
         "pos_mid": "⚙️ Yarim himoyachi",
         "pos_fwd": "⚡ Hujumchi",
+    },
+
+    "de": {
+        # ── Registration ──────────────────────────────────────────────────
+        "reg_welcome": (
+            "👋 Hallo! Willkommen beim <b>Football Manager Bot</b>!\n\n"
+            "Du bist noch nicht registriert. Lass uns das ändern!\n\n"
+            "Tippe /register, um dein Spielerprofil zu erstellen."
+        ),
+        "reg_start": (
+            "👤 <b>Registrierung</b>\n\n"
+            "Schritt 1 von 3\n\n"
+            "Wie heißt du?\n"
+            "<i>Gib Vor- und Nachname ein, z. B. Max Müller</i>"
+        ),
+        "reg_name_too_short": "❌ Name zu kurz. Bitte mindestens 2 Zeichen eingeben:",
+        "reg_choose_position": (
+            "✅ Name: <b>{name}</b>\n\n"
+            "Schritt 2 von 3\n\n"
+            "Wähle deine Position:"
+        ),
+        "reg_choose_rating": (
+            "✅ Position: <b>{position}</b>\n\n"
+            "Schritt 3 von 3\n\n"
+            "Bewerte dein Spielniveau von 1 bis 10:\n"
+            "<i>1 — Anfänger, 10 — Profi</i>"
+        ),
+        "reg_invalid_rating": "❌ Bitte eine Zahl von 1 bis 10 eingeben:",
+        "reg_complete": (
+            "🎉 <b>Registrierung abgeschlossen!</b>\n\n"
+            "👤 Name: <b>{name}</b>\n"
+            "{position}\n"
+            "⭐ Startwertung: <b>{rating}</b>\n\n"
+            "Willkommen in der Liga! ⚽"
+        ),
+        "reg_already": "✅ Du bist bereits registriert! Nutze /start für das Hauptmenü.",
+        "choose_gender": (
+            "👤 <b>Wie sollen wir dich ansprechen?</b>\n\n"
+            "Das hilft dem Bot, dich korrekt anzureden."
+        ),
+        "gender_set": "✅ Fertig! Anredeform gespeichert.",
+        "choose_language": "🌐 <b>Выбери язык / Choose language / Sprache wählen:</b>",
+        "lang_set_ru": "✅ Язык изменён на Русский 🇷🇺",
+        "lang_set_en": "✅ Language changed to English 🇬🇧",
+        "lang_set_uz": "✅ Til o'zbek tiliga o'zgartirildi 🇺🇿",
+        "lang_set_de": "✅ Sprache auf Deutsch geändert 🇩🇪",
+
+        # ── Main menu ────────────────────────────────────────────────────
+        "main_menu_greeting": (
+            "⚽ Hallo, <b>{name}</b>!\n\n"
+            "📍 Position: {position}\n"
+            "⭐ Wertung: {rating}{provisional}\n"
+            "💰 Guthaben: {balance} Sum\n\n"
+            "Wähle eine Aktion:"
+        ),
+        "provisional_label": " <i>(vorläufig)</i>",
+        "no_league_hint": "\n\n💡 <i>Du hast keine Liga. /create_league — erstelle deine eigene!</i>",
+
+        # ── Profile ───────────────────────────────────────────────────────
+        "profile_title": (
+            "👤 <b>Spielerprofil</b>\n\n"
+            "Name: <b>{name}</b>\n"
+            "Position: {position}\n"
+            "⭐ Wertung: <b>{rating}</b>{provisional}\n"
+            "✅ Zuverlässigkeit: <b>{reliability}%</b>\n"
+            "⚽ Spiele: <b>{games}</b>\n"
+            "💰 Guthaben: <b>{balance} Sum</b>"
+        ),
+
+        # ── Standings / stats ─────────────────────────────────────────────
+        "standings_empty": "🏆 <b>Turniertabelle</b>\n\nNoch keine Daten vorhanden.",
+        "standings_title": "🏆 <b>Turniertabelle</b> — {date}",
+        "standings_no_matches": "Noch keine Spiele ausgetragen.",
+        "standings_recent": "\n<b>Letzte Ergebnisse:</b>",
+        "standings_upcoming": "\n<b>Bevorstehende Spiele:</b>",
+        "my_stats_title": (
+            "📊 <b>Meine Statistik — {name}</b>\n\n"
+            "⚽ Gespielte Spiele: <b>{games}</b>\n"
+            "🥅 Tore: <b>{goals}</b>\n"
+            "🟨 Gelbe Karten: <b>{yellow_cards}</b>\n"
+            "🟥 Rote Karten: <b>{red_cards}</b>\n"
+            "✅ Zuverlässigkeit: <b>{reliability}%</b>\n"
+            "⭐ Wertung: <b>{rating}</b>"
+        ),
+        "results_empty": "📋 Noch keine abgeschlossenen Spiele.",
+        "results_title": "📋 <b>Spielergebnisse</b>\n",
+        "no_players": "👥 Noch keine Spieler.",
+        "players_title": "👥 <b>Alle Spieler</b>\n",
+
+        # ── Attendance ────────────────────────────────────────────────────
+        "join_success": (
+            "✅ <b>Du bist für das Spiel angemeldet!</b>\n\n"
+            "📅 {date}\n"
+            "📍 {location}\n\n"
+            "Der Bot erinnert dich 2 Stunden vorher."
+        ),
+        "join_waitlist": (
+            "⏳ Keine Plätze frei — du stehst auf der Warteliste <b>#{position}</b>.\n\n"
+            "Du wirst benachrichtigt, sobald ein Platz frei wird."
+        ),
+        "join_declined": "❌ Du hast abgesagt.\n\nMeinung geändert? Melde dich erneut an.",
+        "confirm_reminder": (
+            "⏰ <b>Erinnerung!</b>\n\n"
+            "Spiel in 2 Stunden!\n"
+            "📅 {date}\n"
+            "📍 {location}\n\n"
+            "Bestätige deine Teilnahme:"
+        ),
+        "confirm_yes_response": "✅ Super! Bis zum Spiel 💪",
+        "confirm_no_response": "😔 Schade! Dein Platz wurde an den nächsten Spieler weitergegeben.",
+        "confirm_late_response": "⏰ Verstanden, du kommst zu spät. Versuche es noch zu schaffen!",
+        "waitlist_promoted": (
+            "🎉 <b>Ein Platz ist frei geworden!</b>\n\n"
+            "Du wurdest von der Warteliste in den Hauptkader übernommen!\n\n"
+            "📅 {date}\n"
+            "📍 {location}"
+        ),
+
+        # ── Match result broadcast ────────────────────────────────────────
+        "match_result_text": (
+            "🏁 <b>Endstand</b>\n\n"
+            "⚽ <b>{home}  {score_home} : {score_away}  {away}</b>\n"
+        ),
+        "match_cards_header": "\n\n<b>Karten:</b>",
+
+        # ── Finance broadcast ──────────────────────────────────────────────
+        "finance_notice": (
+            "💰 <b>Beitrag für {game_name}</b>\n\n"
+            "📅 {date}\n"
+            "📍 {location}\n\n"
+            "💵 Zu zahlender Betrag: <b>{amount} Sum</b>\n\n"
+            "Bitte zahle den Beitrag beim Organisator. Danke! 🙏"
+        ),
+
+        # ── Team assignment ───────────────────────────────────────────────
+        "team_assigned": (
+            "⚽ <b>Teams für {game_name} sind eingeteilt!</b>\n\n"
+            "Wir haben die Teams nach Wertung und Position ausgeglichen.\n\n"
+            "Du spielst heute in der Mannschaft <b>{team_color} {team_name}</b>.\n\n"
+            "Deine Mitspieler: <b>{teammates}</b>\n\n"
+            "Viel Erfolg! 🏆"
+        ),
+
+        # ── Tournament results ────────────────────────────────────────────
+        "tournament_results_header": "🏆 <b>Turnierergebnisse — {game_name}</b>\n",
+        "place_1": "🥇 1. Platz",
+        "place_2": "🥈 2. Platz",
+        "place_3": "🥉 3. Platz",
+        "place_4": "❤️ Publikumsliebling (4. Platz)",
+        "top_scorer": "\n⚽ <b>Torschützenkönig:</b> {name} ({count} {goals_word})",
+        "best_player": "⭐ <b>Bester Spieler:</b> {name}",
+        "tournament_thanks": "\n🙏 Danke an alle fürs Mitspielen! Bis zum nächsten Turnier!",
+
+        # ── Rating voting ─────────────────────────────────────────────────
+        "rating_invite": (
+            "⭐ <b>Bewertungsabstimmung!</b>\n\n"
+            "Bewerte andere Spieler von 1 bis 10.\n"
+            "Deine Noten beeinflussen die Spielerwertungen.\n\n"
+            "<i>Dauert 1–2 Minuten</i>"
+        ),
+        "rating_invite_gameday": (
+            "⭐ <b>Spieler bewerten!</b>\n\n"
+            "Vor der Teameinteilung ({game_name}) bewerte die Teilnehmer von 1 bis 10.\n\n"
+            "Dauert 1–2 Minuten und hilft, die Teams auszugleichen."
+        ),
+        "rating_voted": (
+            "✅ <b>Stimmen abgegeben!</b>\n\n"
+            "Du hast {count} Spieler bewertet.\n"
+            "Danke! Die Ergebnisse werden nach Ende der Runde angewendet. 🙏"
+        ),
+        "rating_vote_nominee": (
+            "⭐ <b>Abstimmung</b> — {current}/{total}\n\n"
+            "👤 <b>{name}</b>\n\n"
+            "Deine Note: <b>{score}</b>\n\n"
+            "<i>Bewerte von 1 (schwach) bis 10 (ausgezeichnet)</i>"
+        ),
+        "score_not_set": "<i>nicht gesetzt</i>",
+
+        # ── My Team (I-040) ───────────────────────────────────────────────
+        "myteam_no_game": "📅 Keine aktiven Turniere.",
+        "myteam_no_teams": "⚽ Teams für <b>{game_name}</b> wurden noch nicht eingeteilt.\n\nDer Organisator teilt die Teams vor dem Spiel ein.",
+        "myteam_not_in_team": "🤔 Du bist für das nächste Turnier in keinem Team.\n\nMöglicherweise bist du nicht angemeldet oder die Teams wurden noch nicht eingeteilt.",
+        "myteam_title": (
+            "👥 <b>Dein Team — {game_name}</b>\n"
+            "📅 {date} | 📍 {location}\n\n"
+            "{team_emoji} <b>{team_name}</b>\n\n"
+            "<b>Kader:</b>\n"
+        ),
+
+        # ── Top Scorers (I-020) ───────────────────────────────────────────
+        "top_scorers_title": "⚽ <b>Torschützen</b>\n",
+        "top_scorers_empty": "📊 Noch keine Tore erzielt.",
+        "top_scorers_all_time": "📊 <b>Ewige Torschützenliste</b>\n",
+
+        # ── Match Schedule (I-042) ─────────────────────────────────────────
+        "schedule_title": "📅 <b>Spielplan — {game_name}</b>\n",
+        "schedule_empty": "📋 Spielplan noch nicht erstellt.\n\nFüge Spiele über den Button unten hinzu.",
+        "schedule_match_row": "{num}. {emoji1} {team1} vs {emoji2} {team2}",
+        "schedule_add_title": "📅 <b>Spiel zum Spielplan hinzufügen</b>\n\nSchritt 1: <b>Team 1</b> wählen:",
+        "schedule_pick_team2": "✅ Team 1: <b>{team1}</b>\n\nSchritt 2: <b>Team 2</b> wählen:",
+        "schedule_added": "✅ Spiel wurde als <b>#{num}</b> zum Spielplan hinzugefügt.",
+        "schedule_started": "▶️ Spiel <b>{num}</b> gestartet!",
+        "schedule_all_done": "🏁 Alle geplanten Spiele sind abgeschlossen!",
+
+        # ── Post Results (I-013) ───────────────────────────────────────────
+        "results_broadcast_header": "🏁 <b>Ergebnisse {game_name}</b>\n\n",
+        "results_broadcast_sent": "✅ Turnierergebnisse an <b>{count}</b> Spieler gesendet.",
+        "results_broadcast_empty": "⚠️ Keine abgeschlossenen Spiele zum Versenden.",
+
+        # ── Channel Post (I-043) ───────────────────────────────────────────
+        "channel_posted": "✅ Ergebnisse im Kanal veröffentlicht.",
+        "channel_not_set": (
+            "⚠️ Kanal nicht konfiguriert.\n\n"
+            "Füge die Variable CHANNEL_ID in den Railway-Einstellungen hinzu\n"
+            "<i>(z. B. @mychannel oder -1001234567890)</i>"
+        ),
+
+        # ── Buttons ───────────────────────────────────────────────────────
+        "btn_my_team": "👥 Mein Team",
+        "btn_top_scorers": "⚽ Torschützen",
+        "btn_upcoming_game": "📅 Nächstes Spiel",
+        "btn_standings": "🏆 Turniertabelle",
+        "btn_my_stats": "📊 Meine Statistik",
+        "btn_players_list": "👥 Spieler",
+        "btn_results": "📋 Spielergebnisse",
+        "btn_rules": "📜 Reglement",
+        "btn_language": "🌐 Sprache / Language",
+        "btn_profile": "👤 Mein Profil",
+        "btn_rate_players": "⭐ Spieler bewerten",
+        "btn_back": "🔙 Zurück",
+        "btn_confirm_yes": "✅ Ja, ich bin dabei!",
+        "btn_confirm_no": "❌ Kann nicht kommen",
+        "btn_confirm_late": "⏰ Komme zu spät",
+        "btn_register": "✅ Zustimmen & Anmelden",
+        "btn_cancel_reg": "❌ Abbrechen",
+        "btn_read_rules": "📜 Reglement lesen",
+        "btn_join": "✅ Anmelden",
+        "btn_decline": "❌ Absagen",
+        "btn_rate_players_start": "⭐ Spieler bewerten",
+        "btn_vote_prev": "◀️ Zurück",
+        "btn_vote_next": "▶️ Weiter",
+        "btn_vote_submit": "✅ Stimmen absenden",
+
+        # ── Position labels ───────────────────────────────────────────────
+        "pos_gk": "🧤 Torwart",
+        "pos_def": "🛡 Verteidiger",
+        "pos_mid": "⚙️ Mittelfeldspieler",
+        "pos_fwd": "⚡ Stürmer",
     },
 }

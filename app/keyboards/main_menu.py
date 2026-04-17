@@ -61,6 +61,10 @@ def language_kb(current_lang: str) -> InlineKeyboardMarkup:
             text="🇺🇿 O'zbekcha" + (" ✅" if current_lang == "uz" else ""),
             callback_data="set_lang:uz"
         ),
+        InlineKeyboardButton(
+            text="🇩🇪 Deutsch" + (" ✅" if current_lang == "de" else ""),
+            callback_data="set_lang:de"
+        ),
     )
     return builder.as_markup()
 
