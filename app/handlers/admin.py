@@ -80,9 +80,12 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
             return f' <a href="https://t.me/{p.username}">@{p.username}</a>'
         return f' <a href="tg://user?id={p.telegram_id}">💬</a>'
 
-    lines = [f"📋 <b>{gd_name}</b>\n👥 Записались ({len(attendances)}/{game_day.player_limit if game_day else '?'}):\n"]
+    limit = game_day.player_limit if game_day else "?"
+    lines = [f"📋 <b>{gd_name}</b>\n👥 Записались ({len(attendances)}/{limit}):\n"]
     for i, att in enumerate(attendances, 1):
         p = att.player
+        if not p:
+            continue
         pos = POSITION_LABELS.get(p.position, p.position)
         lines.append(f"{i}. <b>{p.name}</b>{_player_line(p)} — {pos}, ⭐{p.rating:.1f}")
 
@@ -90,10 +93,11 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
         lines.append(f"\n⏳ <b>Лист ожидания ({len(waitlist)}):</b>")
         for i, att in enumerate(waitlist, 1):
             p = att.player
+            if not p:
+                continue
             lines.append(f"{i}. {p.name}{_player_line(p)}")
 
     action_kb = game_day_action_kb(game_day_id)
-    # Inject "kick player" button into the action keyboard
     from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
     builder = IKB()
     builder.row(InlineKeyboardButton(
@@ -105,6 +109,7 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
 
     await call.message.edit_text(
         "\n".join(lines),
+        parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
 
