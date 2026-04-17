@@ -46,72 +46,80 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
         return
     await call.answer()
 
-    game_day_id = int(call.data.split(":")[1])
+    try:
+        game_day_id = int(call.data.split(":")[1])
 
-    game_day = await session.get(GameDay, game_day_id)
+        game_day = await session.get(GameDay, game_day_id)
 
-    all_att_result = await session.execute(
-        select(Attendance)
-        .options(selectinload(Attendance.player))
-        .where(
-            Attendance.game_day_id == game_day_id,
-            Attendance.response.in_([AttendanceResponse.YES, AttendanceResponse.WAITLIST])
+        all_att_result = await session.execute(
+            select(Attendance)
+            .options(selectinload(Attendance.player))
+            .where(
+                Attendance.game_day_id == game_day_id,
+                Attendance.response.in_([AttendanceResponse.YES, AttendanceResponse.WAITLIST])
+            )
+            .order_by(Attendance.responded_at)
         )
-        .order_by(Attendance.responded_at)
-    )
-    all_att = all_att_result.scalars().all()
+        all_att = all_att_result.scalars().all()
 
-    attendances = [a for a in all_att if a.response == AttendanceResponse.YES]
-    waitlist = [a for a in all_att if a.response == AttendanceResponse.WAITLIST]
+        attendances = [a for a in all_att if a.response == AttendanceResponse.YES]
+        waitlist = [a for a in all_att if a.response == AttendanceResponse.WAITLIST]
 
-    gd_name = game_day.display_name if game_day else f"#{game_day_id}"
+        gd_name = game_day.display_name if game_day else f"#{game_day_id}"
 
-    if not attendances and not waitlist:
-        await call.message.edit_text(
-            f"📋 <b>{gd_name}</b>\n\n📭 Никто ещё не записался.",
-            reply_markup=game_day_action_kb(game_day_id)
-        )
-        return
+        if not attendances and not waitlist:
+            await call.message.edit_text(
+                f"📋 <b>{gd_name}</b>\n\n📭 Никто ещё не записался.",
+                parse_mode="HTML",
+                reply_markup=game_day_action_kb(game_day_id)
+            )
+            return
 
-    from app.database.models import POSITION_LABELS
+        from app.database.models import POSITION_LABELS
 
-    def _player_line(p):
-        if p.username:
-            return f' <a href="https://t.me/{p.username}">@{p.username}</a>'
-        return f' <a href="tg://user?id={p.telegram_id}">💬</a>'
+        def _player_line(p):
+            if p.username:
+                link = f'https://t.me/{p.username}'
+                return f' <a href="{link}">@{p.username}</a>'
+            return f' <a href="tg://user?id={p.telegram_id}">💬</a>'
 
-    limit = game_day.player_limit if game_day else "?"
-    lines = [f"📋 <b>{gd_name}</b>\n👥 Записались ({len(attendances)}/{limit}):\n"]
-    for i, att in enumerate(attendances, 1):
-        p = att.player
-        if not p:
-            continue
-        pos = POSITION_LABELS.get(p.position, p.position)
-        lines.append(f"{i}. <b>{p.name}</b>{_player_line(p)} — {pos}, ⭐{p.rating:.1f}")
-
-    if waitlist:
-        lines.append(f"\n⏳ <b>Лист ожидания ({len(waitlist)}):</b>")
-        for i, att in enumerate(waitlist, 1):
+        limit = game_day.player_limit if game_day else "?"
+        lines = [f"📋 <b>{gd_name}</b>\n👥 Записались ({len(attendances)}/{limit}):\n"]
+        for i, att in enumerate(attendances, 1):
             p = att.player
             if not p:
                 continue
-            lines.append(f"{i}. {p.name}{_player_line(p)}")
+            pos = POSITION_LABELS.get(p.position, p.position or "—")
+            rating = p.rating if p.rating is not None else 0.0
+            lines.append(f"{i}. <b>{p.name}</b>{_player_line(p)} — {pos}, ⭐{rating:.1f}")
 
-    action_kb = game_day_action_kb(game_day_id)
-    from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
-    builder = IKB()
-    builder.row(InlineKeyboardButton(
-        text="❌ Убрать игрока из записи",
-        callback_data=f"gd_kick_list:{game_day_id}"
-    ))
-    for row in action_kb.inline_keyboard:
-        builder.row(*row)
+        if waitlist:
+            lines.append(f"\n⏳ <b>Лист ожидания ({len(waitlist)}):</b>")
+            for i, att in enumerate(waitlist, 1):
+                p = att.player
+                if not p:
+                    continue
+                lines.append(f"{i}. {p.name}{_player_line(p)}")
 
-    await call.message.edit_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=builder.as_markup()
-    )
+        action_kb = game_day_action_kb(game_day_id)
+        from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+        builder = IKB()
+        builder.row(InlineKeyboardButton(
+            text="❌ Убрать игрока из записи",
+            callback_data=f"gd_kick_list:{game_day_id}"
+        ))
+        for row in action_kb.inline_keyboard:
+            builder.row(*row)
+
+        await call.message.edit_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
+
+    except Exception as e:
+        logger.error(f"gd_players error: {e}", exc_info=True)
+        await call.answer(f"❌ Ошибка: {type(e).__name__}: {e}", show_alert=True)
 
 
 # ---------- Убрать игрока из записи ----------
