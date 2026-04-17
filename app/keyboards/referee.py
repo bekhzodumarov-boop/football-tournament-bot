@@ -193,12 +193,14 @@ def sub_player_out_kb(match_id: int, team_id: int, players: list) -> InlineKeybo
 
 
 def sub_player_in_kb(match_id: int, team_id: int, player_out_id: int,
-                     players: list) -> InlineKeyboardMarkup:
-    """Выбор замены (выходит на поле)."""
+                     players: list, other_team_ids: set = None) -> InlineKeyboardMarkup:
+    """Выбор замены (выходит на поле). * — игрок из другой команды."""
     builder = InlineKeyboardBuilder()
+    other_team_ids = other_team_ids or set()
     for p in players:
+        mark = " *" if p.id in other_team_ids else ""
         builder.button(
-            text=p.name,
+            text=f"{p.name}{mark}",
             callback_data=f"ref_sub_in:{match_id}:{team_id}:{player_out_id}:{p.id}"
         )
     builder.adjust(2)

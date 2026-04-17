@@ -7,6 +7,10 @@
   - /create_league команда
 """
 from urllib.parse import quote
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 from aiogram import Router, F, Bot
 from aiogram.filters import Command, StateFilter
@@ -434,8 +438,9 @@ async def _broadcast_finance(msg, state: FSMContext, session: AsyncSession, bot:
         try:
             await bot.send_message(att.player.telegram_id, text)
             sent += 1
-        except Exception:
-            pass
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Cannot send finance notice to {att.player.telegram_id}: {e}")
 
     from app.keyboards.main_menu import admin_menu_kb
     await msg.answer(
@@ -780,15 +785,35 @@ async def adm_rating_round_start(call: CallbackQuery, session: AsyncSession, bot
     )
     existing = active_res.scalar_one_or_none()
     if existing:
+        # Считаем прогресс: сколько уникальных voters уже проголосовало
+        from sqlalchemy import func as sqlfunc
+        voted_res = await session.execute(
+            select(sqlfunc.count(sqlfunc.distinct(RatingVote.voter_id)))
+            .where(RatingVote.round_id == existing.id)
+        )
+        voted_count = voted_res.scalar() or 0
+
+        # Сколько было приглашено
+        total_query = select(sqlfunc.count(Player.id)).where(Player.status == PlayerStatus.ACTIVE)
+        if league_id:
+            total_query = total_query.where(Player.league_id == league_id)
+        total_res = await session.execute(total_query)
+        total_count = (total_res.scalar() or 1) - 1  # минус сам голосующий
+
         builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(
+            text="🔄 Обновить прогресс",
+            callback_data="admin_rating_round"
+        ))
         builder.row(InlineKeyboardButton(
             text="🔒 Закрыть раунд и применить",
             callback_data=f"rating_round_close:{existing.id}"
         ))
         builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back"))
         await call.message.edit_text(
-            f"⭐ <b>Раунд голосования уже активен</b>\n\n"
+            f"⭐ <b>Раунд голосования активен</b>\n\n"
             f"Начат: {existing.started_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"📊 Проголосовали: <b>{voted_count}</b> из ~{total_count} игроков\n\n"
             "Дождись голосования от игроков или закрой раунд вручную:",
             reply_markup=builder.as_markup()
         )
@@ -826,8 +851,9 @@ async def adm_rating_round_start(call: CallbackQuery, session: AsyncSession, bot
                 reply_markup=vote_kb.as_markup()
             )
             sent += 1
-        except Exception:
-            pass
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Cannot send rating invite to {p.telegram_id}: {e}")
 
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(
@@ -1112,16 +1138,38 @@ async def gd_rating_poll_start(call: CallbackQuery, session: AsyncSession, bot: 
     )
     existing = existing_res.scalar_one_or_none()
     if existing:
+        # Прогресс: сколько уже проголосовало
+        from sqlalchemy import func as sqlfunc
+        voted_res = await session.execute(
+            select(sqlfunc.count(sqlfunc.distinct(RatingVote.voter_id)))
+            .where(RatingVote.round_id == existing.id)
+        )
+        voted_count = voted_res.scalar() or 0
+
+        # Сколько участников игрового дня
+        att_count_res = await session.execute(
+            select(sqlfunc.count(Attendance.id)).where(
+                Attendance.game_day_id == game_day_id,
+                Attendance.response == AttendanceResponse.YES,
+            )
+        )
+        total_count = (att_count_res.scalar() or 1) - 1  # минус сам голосующий
+
         builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(
+            text="🔄 Обновить прогресс",
+            callback_data=f"gd_rating_poll:{game_day_id}"
+        ))
         builder.row(InlineKeyboardButton(
             text="🔒 Завершить и применить рейтинги",
             callback_data=f"gd_rating_close:{existing.id}:{game_day_id}"
         ))
         builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
         await call.message.edit_text(
-            f"📊 <b>Опрос рейтингов уже активен</b>\n\n"
+            f"📊 <b>Опрос рейтингов активен</b>\n\n"
             f"Игровой день: <b>{game_day.display_name}</b>\n"
             f"Начат: {existing.started_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"📊 Проголосовали: <b>{voted_count}</b> из ~{total_count} игроков\n\n"
             "Дождись ответов от игроков или завершите раунд вручную:",
             reply_markup=builder.as_markup()
         )
@@ -1172,8 +1220,9 @@ async def gd_rating_poll_start(call: CallbackQuery, session: AsyncSession, bot: 
                 reply_markup=vote_kb.as_markup()
             )
             sent += 1
-        except Exception:
-            pass
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Cannot send game day rating invite to {p.telegram_id}: {e}")
 
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(
@@ -1630,8 +1679,9 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
                     f"Удачи на игре! 🏆"
                 )
                 sent += 1
-            except Exception:
-                pass
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                logger.warning(f"Cannot send team assignment to {member['telegram_id']}: {e}")
 
     # ── Сводка для Админа ─────────────────────────────────────────────
     admin_lines = [f"⚽ <b>Команды сформированы!</b> ({gd_name})\n"]
@@ -1661,15 +1711,17 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
             try:
                 await bot.send_message(ref.telegram_id, full_summary)
                 notified_ids.add(ref.telegram_id)
-            except Exception:
-                pass
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                logger.warning(f"Cannot send team summary to referee {ref.telegram_id}: {e}")
     for admin_tg_id in settings.ADMIN_IDS:
         if admin_tg_id not in notified_ids:
             try:
                 await bot.send_message(admin_tg_id, full_summary)
                 notified_ids.add(admin_tg_id)
-            except Exception:
-                pass
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                logger.warning(f"Cannot send team summary to admin {admin_tg_id}: {e}")
 
     # Показать сводку Админу (новым сообщением — надёжнее edit_text)
     await call.message.answer(full_summary, reply_markup=game_day_action_kb(game_day_id))

@@ -22,6 +22,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus,
@@ -205,8 +209,8 @@ async def _update_timer_message(match_id: int):
         await data["bot"].edit_message_text(
             text, chat_id=data["chat_id"], message_id=data["message_id"], parse_mode="HTML"
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Timer message update failed for match {match_id}: {e}")
     if remaining.total_seconds() <= 0:
         try:
             scheduler.remove_job(f"timer_tick_{match_id}")
@@ -1079,8 +1083,8 @@ async def ref_finish_match(call: CallbackQuery, session: AsyncSession,
         try:
             await bot.send_message(p.telegram_id, result_text)
             notified += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Cannot send match result to {p.telegram_id}: {e}")
 
     if notified:
         await call.message.answer(f"📢 Результаты отправлены {notified} игрокам.")
@@ -1093,6 +1097,66 @@ async def ref_finish_match(call: CallbackQuery, session: AsyncSession,
 @router.callback_query(F.data == "noop")
 async def noop(call: CallbackQuery):
     await call.answer()
+
+
+# ─────────────────────────────────────────────
+#  Статус таймера
+# ─────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("ref_timer:"))
+async def ref_timer_status(call: CallbackQuery, session: AsyncSession,
+                           player: Player | None):
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    match_id = int(call.data.split(":")[1])
+
+    data = _active_timers.get(match_id)
+    if data:
+        elapsed = datetime.now() - data["started_at"]
+        remaining = timedelta(minutes=data["duration_min"]) - elapsed
+        rem_sec_total = max(int(remaining.total_seconds()), 0)
+        rem_min = rem_sec_total // 60
+        rem_sec = rem_sec_total % 60
+        await call.answer(f"⏱ Осталось: {rem_min}:{rem_sec:02d}")
+    else:
+        await call.answer()
+
+    match = await _load_match(session, match_id)
+    if not match:
+        return
+    await call.message.edit_text(
+        _match_panel_text(match),
+        reply_markup=referee_match_kb(
+            match_id,
+            is_started=match.status == MatchStatus.IN_PROGRESS,
+            is_finished=match.status == MatchStatus.FINISHED,
+        )
+    )
+
+
+# ─────────────────────────────────────────────
+#  Отмена FSM судьи
+# ─────────────────────────────────────────────
+
+@router.message(
+    Command("cancel"),
+    StateFilter(
+        RefereeMatchFSM.waiting_team1, RefereeMatchFSM.waiting_team1_players,
+        RefereeMatchFSM.waiting_team2, RefereeMatchFSM.waiting_team2_players,
+        RefereeMatchFSM.waiting_pick_team1, RefereeMatchFSM.waiting_pick_team2,
+        RefereeMatchFSM.waiting_format, RefereeMatchFSM.waiting_duration,
+        RefereeMatchFSM.waiting_goals_count,
+        RefereeTeamSetupFSM.waiting_team_name, RefereeTeamSetupFSM.waiting_team_players,
+    )
+)
+async def referee_fsm_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "❌ Действие отменено.\n\n"
+        "📋 /referee — вернуться в панель судьи"
+    )
 
 
 # ─────────────────────────────────────────────
@@ -1543,23 +1607,34 @@ async def ref_sub_select_in(call: CallbackQuery, session: AsyncSession,
 
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
 
-    # Найти игроков, которые НЕ в составах команд этого матча
-    # (записавшиеся, но не назначенные ни в одну команду этого матча)
+    # Доступны для замены:
+    # 1. Записавшиеся на игровой день, но не в командах (скамейка)
+    # 2. Игроки из ДРУГОЙ команды этого матча (Т-023: взять из противника/партнёра)
     all_attendees = await _get_attendees(session, match.game_day_id)
     team_home_players = await _get_team_players(session, match.team_home_id)
     team_away_players = await _get_team_players(session, match.team_away_id)
-    assigned_ids = {p.id for p in team_home_players + team_away_players}
-    available_subs = [p for p in all_attendees if p.id not in assigned_ids]
+
+    this_team_ids = {p.id for p in (team_home_players if team_id == match.team_home_id else team_away_players)}
+    # Исключаем только игрока из ЭТОЙ команды (кроме выходящего), доступны все остальные
+    available_subs = [
+        p for p in all_attendees
+        if p.id != player_out_id and p.id not in this_team_ids
+    ]
 
     if not available_subs:
-        await call.answer("⚠️ Нет свободных игроков для замены.", show_alert=True)
+        await call.answer("⚠️ Нет доступных игроков для замены.", show_alert=True)
         return
+
+    # Пометить игроков из другой команды
+    other_team_ids = {p.id for p in (team_away_players if team_id == match.team_home_id else team_home_players)}
 
     await call.message.edit_text(
         f"🔄 <b>Замена — {team_name}</b>\n\n"
         f"Выходит: <b>{player_out.name}</b>\n\n"
-        "Кто <b>выходит на поле</b>?",
-        reply_markup=sub_player_in_kb(match_id, team_id, player_out_id, available_subs)
+        "Кто <b>выходит на поле</b>?\n"
+        "<i>* — игрок из другой команды</i>",
+        reply_markup=sub_player_in_kb(match_id, team_id, player_out_id, available_subs,
+                                      other_team_ids=other_team_ids)
     )
 
 
@@ -1583,12 +1658,18 @@ async def ref_sub_execute(call: CallbackQuery, session: AsyncSession,
         await call.answer("❌ Ошибка", show_alert=True)
         return
 
-    # Удалить старого игрока из команды, добавить нового
+    # Удалить выходящего из его команды
     from sqlalchemy import delete as sql_delete
     await session.execute(
         sql_delete(TeamPlayer).where(
             TeamPlayer.team_id == team_id,
             TeamPlayer.player_id == player_out_id,
+        )
+    )
+    # Если входящий был в другой команде — убрать его оттуда тоже
+    await session.execute(
+        sql_delete(TeamPlayer).where(
+            TeamPlayer.player_id == player_in_id,
         )
     )
     session.add(TeamPlayer(team_id=team_id, player_id=player_in_id))

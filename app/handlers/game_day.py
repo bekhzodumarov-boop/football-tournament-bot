@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta
+import logging
+import asyncio
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -17,6 +19,7 @@ from app.keyboards.game_day import join_game_kb, join_confirm_kb, game_day_actio
 from app.data.reglament import REGLAMENT_AGREEMENT
 from app.reminders import schedule_reminders
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 
@@ -137,6 +140,11 @@ async def decline_pre(call: CallbackQuery):
     await call.message.delete()
 
 
+@router.callback_query(F.data == "closed")
+async def closed_registration(call: CallbackQuery):
+    await call.answer("🔒 Запись закрыта. Следи за анонсами!", show_alert=True)
+
+
 # ---------- Записаться ----------
 
 @router.callback_query(F.data.startswith("join:"))
@@ -179,6 +187,19 @@ async def join_game(call: CallbackQuery, session: AsyncSession, player: Player |
     is_full = registered >= game_day.player_limit
 
     if is_full:
+        # Уже в листе ожидания — не добавлять повторно
+        if existing and existing.response == AttendanceResponse.WAITLIST:
+            waitlist_list = [
+                a for a in game_day.attendances
+                if a.response == AttendanceResponse.WAITLIST
+            ]
+            waitlist_list.sort(key=lambda a: a.responded_at or datetime.min)
+            pos = next(
+                (i + 1 for i, a in enumerate(waitlist_list) if a.player_id == player.id), "?"
+            )
+            await call.answer(f"Ты уже в листе ожидания (#{pos})!", show_alert=True)
+            return
+
         # Добавить в лист ожидания
         waitlist_count = sum(
             1 for a in game_day.attendances
@@ -302,8 +323,8 @@ async def _notify_first_waitlist(session: AsyncSession, game_day_id: int, bot: B
             "Ты первый в листе ожидания. Хочешь записаться?",
             reply_markup=join_game_kb(game_day_id, game_day.is_open)
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Cannot notify waitlist player {first.player.telegram_id}: {e}")
 
 
 # ---------- Создание игрового дня ----------
@@ -461,5 +482,6 @@ async def _auto_announce(session: AsyncSession, bot: Bot,
                 text,
                 reply_markup=join_game_kb(game_day.id, game_day.is_open)
             )
-        except Exception:
-            pass
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Cannot send announce to {p.telegram_id}: {e}")

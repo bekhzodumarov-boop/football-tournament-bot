@@ -1,3 +1,5 @@
+import logging
+import asyncio
 from aiogram import Router, F, Bot
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -16,6 +18,7 @@ from app.database.models import (
 )
 from app.keyboards.game_day import game_day_action_kb, join_game_kb, delete_confirm_kb
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 
@@ -78,10 +81,47 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
     )
 
 
-# ---------- Разослать анонс ----------
+# ---------- Разослать анонс (подтверждение) ----------
 
 @router.callback_query(F.data.startswith("gd_announce:"))
-async def gd_announce(call: CallbackQuery, session: AsyncSession, bot: Bot):
+async def gd_announce(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        return
+
+    players_result = await session.execute(
+        select(Player).where(Player.status == "active")
+    )
+    player_count = len(players_result.scalars().all())
+
+    confirm_kb = InlineKeyboardBuilder()
+    confirm_kb.row(
+        InlineKeyboardButton(
+            text=f"📢 Да, разослать {player_count} игрокам",
+            callback_data=f"gd_announce_ok:{game_day_id}"
+        )
+    )
+    confirm_kb.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"gd_players:{game_day_id}")
+    )
+
+    await call.message.edit_text(
+        f"📢 <b>Разослать анонс?</b>\n\n"
+        f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"📍 {game_day.location}\n\n"
+        f"Сообщение получат <b>{player_count}</b> активных игроков.",
+        reply_markup=confirm_kb.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("gd_announce_ok:"))
+async def gd_announce_execute(call: CallbackQuery, session: AsyncSession, bot: Bot):
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
         return
@@ -98,7 +138,6 @@ async def gd_announce(call: CallbackQuery, session: AsyncSession, bot: Bot):
     )
     players = players_result.scalars().all()
 
-    spots_left = game_day.player_limit
     text = (
         f"⚽ <b>Анонс игры!</b>\n\n"
         f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
@@ -117,8 +156,9 @@ async def gd_announce(call: CallbackQuery, session: AsyncSession, bot: Bot):
                 reply_markup=join_game_kb(game_day.id, game_day.is_open)
             )
             sent += 1
-        except Exception:
-            pass
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Cannot send announce to {player.telegram_id}: {e}")
 
     await call.message.answer(f"✅ Анонс отправлен {sent} игрокам.")
 
@@ -270,8 +310,9 @@ async def gd_cancel_game(call: CallbackQuery, session: AsyncSession, bot: Bot):
         try:
             await bot.send_message(att.player.telegram_id, cancel_text)
             notified += 1
-        except Exception:
-            pass
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Cannot send cancel notice to {att.player.telegram_id}: {e}")
 
     await call.message.edit_text(
         f"❌ <b>Игра отменена.</b>\n\nУведомление отправлено {notified} игрокам.",
@@ -482,8 +523,8 @@ async def adm_toggle_referee(call: CallbackQuery, session: AsyncSession, bot: Bo
                 player.telegram_id,
                 "ℹ️ Роль судьи снята с твоего аккаунта."
             )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Cannot notify player {player.telegram_id} about referee role: {e}")
 
     # Обновить карточку
     await adm_player_card(call, session)
@@ -516,8 +557,8 @@ async def adm_toggle_ban(call: CallbackQuery, session: AsyncSession, bot: Bot):
 
     try:
         await bot.send_message(player.telegram_id, msg)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Cannot notify player {player.telegram_id} about ban status: {e}")
 
     await adm_player_card(call, session)
 
@@ -650,7 +691,9 @@ async def adm_broadcast_send(message: Message, state: FSMContext, session: Async
         try:
             await bot.send_message(player.telegram_id, text)
             sent += 1
-        except Exception:
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Broadcast failed for {player.telegram_id}: {e}")
             failed += 1
 
     from app.keyboards.main_menu import admin_menu_kb
@@ -774,41 +817,3 @@ async def adm_export_sheets(call: CallbackQuery, session: AsyncSession):
             "Проверь правильность GOOGLE_CREDENTIALS_JSON и GOOGLE_SHEET_ID.",
             reply_markup=admin_menu_kb(),
         )
-
-
-
-# ── ВРЕМЕННАЯ КОМАНДА: очистить пустые команды ──────────────────────────
-@router.message(Command("fix_teams"))
-async def fix_empty_teams(message: Message, session: AsyncSession):
-    if not settings.is_admin(message.from_user.id):
-        return
-    from app.database.models import Team, TeamPlayer, Match, Goal, Card
-    from sqlalchemy import delete as _del
-
-    # Найти команды без игроков
-    tp_subq = select(TeamPlayer.team_id).distinct()
-    empty_res = await session.execute(
-        select(Team).where(Team.id.not_in(tp_subq))
-    )
-    empty_teams = empty_res.scalars().all()
-    if not empty_teams:
-        await message.answer("✅ Пустых команд нет.")
-        return
-
-    ids = [t.id for t in empty_teams]
-    names = ", ".join(f"{t.name} (id={t.id})" for t in empty_teams)
-
-    matches_res = await session.execute(
-        select(Match).where(
-            (Match.team_home_id.in_(ids)) | (Match.team_away_id.in_(ids))
-        )
-    )
-    mid = [m.id for m in matches_res.scalars().all()]
-    if mid:
-        await session.execute(_del(Goal).where(Goal.match_id.in_(mid)))
-        await session.execute(_del(Card).where(Card.match_id.in_(mid)))
-        await session.execute(_del(Match).where(Match.id.in_(mid)))
-    await session.execute(_del(Team).where(Team.id.in_(ids)))
-    await session.commit()
-
-    await message.answer(f"✅ Удалено {len(empty_teams)} пустых команд:\n{names}")
