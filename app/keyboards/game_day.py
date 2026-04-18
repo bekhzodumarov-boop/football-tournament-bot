@@ -66,11 +66,14 @@ def game_day_action_kb(game_day_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="💸 Финансовый итог", callback_data=f"gd_finance:{game_day_id}"),
     )
     builder.row(
-        InlineKeyboardButton(text="📊 Опрос рейтингов", callback_data=f"gd_rating_poll:{game_day_id}"),
-        InlineKeyboardButton(text="🎲 Создать команды", callback_data=f"gd_auto_teams:{game_day_id}"),
+        InlineKeyboardButton(text="🎲 Авто-команды", callback_data=f"gd_auto_teams:{game_day_id}"),
+        InlineKeyboardButton(text="✋ Вручную", callback_data=f"ref_setup_teams:{game_day_id}"),
     )
     builder.row(
         InlineKeyboardButton(text="✏️ Переименовать команды", callback_data=f"gd_rename_teams:{game_day_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="📢 Запустить опрос", callback_data=f"gd_poll:{game_day_id}"),
     )
     builder.row(
         InlineKeyboardButton(text="📅 Расписание матчей", callback_data=f"gd_schedule:{game_day_id}"),

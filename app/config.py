@@ -6,6 +6,7 @@ from typing import List
 class Settings(BaseSettings):
     BOT_TOKEN: str
     ADMIN_IDS: List[int] = []
+    DEVELOPER_IDS: List[int] = []  # Telegram ID разработчиков бота
 
     DATABASE_URL: str
     REDIS_URL: str = "memory://"
@@ -31,7 +32,7 @@ class Settings(BaseSettings):
     GOOGLE_CREDENTIALS_JSON: str = ""
     GOOGLE_SHEET_ID: str = ""
 
-    @field_validator("ADMIN_IDS", mode="before")
+    @field_validator("ADMIN_IDS", "DEVELOPER_IDS", mode="before")
     @classmethod
     def parse_admin_ids(cls, v):
         if isinstance(v, str):
@@ -47,6 +48,10 @@ class Settings(BaseSettings):
 
     def is_admin(self, user_id: int) -> bool:
         return user_id in self.ADMIN_IDS
+
+    def is_developer(self, user_id: int) -> bool:
+        """Разработчик бота — доступ к глобальной аналитике."""
+        return user_id in self.DEVELOPER_IDS or user_id in self.ADMIN_IDS
 
 
 settings = Settings()

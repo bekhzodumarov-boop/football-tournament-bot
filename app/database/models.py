@@ -5,8 +5,8 @@ from enum import Enum as PyEnum
 from typing import Optional
 
 from sqlalchemy import (
-    BigInteger, Boolean, DateTime, Float, ForeignKey,
-    Integer, String, Enum, Text, func
+    BigInteger, Boolean, Date, DateTime, Float, ForeignKey,
+    Integer, String, Enum, Text, UniqueConstraint, func
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -322,3 +322,16 @@ class Card(Base):
     match: Mapped["Match"] = relationship(back_populates="cards")
     player: Mapped["Player"] = relationship()
     team: Mapped["Team"] = relationship()
+
+
+class UserActivity(Base):
+    """Трекинг ежедневной активности пользователей (DAU/WAU/MAU)."""
+    __tablename__ = "user_activity"
+    __table_args__ = (
+        UniqueConstraint("telegram_id", "activity_date", name="uq_user_activity_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    activity_date: Mapped[datetime] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

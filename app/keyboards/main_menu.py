@@ -107,6 +107,7 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📤 Экспорт в Sheets", callback_data="admin_export_sheets"),
     )
     builder.row(
+        InlineKeyboardButton(text="📢 Опрос лиге", callback_data="admin_poll"),
         InlineKeyboardButton(text="💳 Моя банковская карта", callback_data="admin_card"),
     )
     builder.row(

@@ -5,6 +5,7 @@ from .game_day import router as game_day_router
 from .admin import router as admin_router
 from .admin_extra import router as admin_extra_router
 from .referee import router as referee_router
+from .developer import router as developer_router
 
 
 def register_all_handlers(dp: Dispatcher):
@@ -15,3 +16,4 @@ def register_all_handlers(dp: Dispatcher):
     dp.include_router(admin_router)
     dp.include_router(admin_extra_router)
     dp.include_router(referee_router)
+    dp.include_router(developer_router)

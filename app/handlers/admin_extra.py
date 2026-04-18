@@ -67,6 +67,11 @@ class AdminCardFSM(StatesGroup):
     waiting_card_number = State()
 
 
+class PollFSM(StatesGroup):
+    waiting_question = State()
+    waiting_options = State()
+
+
 class ScheduleFSM(StatesGroup):
     waiting_team1 = State()
     waiting_team2 = State()
@@ -3110,3 +3115,195 @@ async def admin_card_delete(call: CallbackQuery, session: AsyncSession):
         "Теперь при рассылке финансового итога бот будет спрашивать номер карты каждый раз.",
         reply_markup=_card_kb(False)
     )
+
+
+# ══════════════════════════════════════════════════════
+#  ОПРОСЫ (Polls)
+# ══════════════════════════════════════════════════════
+
+def _poll_cancel_kb(back_data: str = "admin_back"):
+    """Кнопка отмены FSM опроса."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=back_data))
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("gd_poll:"))
+async def gd_poll_start(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    """Запуск опроса для участников конкретного игрового дня."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+
+    # Проверяем что есть участники
+    result = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES,
+        )
+    )
+    attendances = result.scalars().all()
+    if not attendances:
+        await call.message.edit_text(
+            "⚠️ Нет зарегистрированных участников для этого игрового дня.",
+            reply_markup=_poll_cancel_kb(f"gd_players:{game_day_id}")
+        )
+        return
+
+    await state.set_state(PollFSM.waiting_question)
+    await state.update_data(target="game_day", game_day_id=game_day_id)
+
+    await call.message.edit_text(
+        f"📢 <b>Опрос для участников игрового дня</b> (ID {game_day_id})\n\n"
+        f"👥 Получателей: <b>{len(attendances)}</b>\n\n"
+        "✏️ Введи <b>вопрос</b> для опроса:",
+        reply_markup=_poll_cancel_kb(f"gd_players:{game_day_id}")
+    )
+
+
+@router.callback_query(F.data == "admin_poll")
+async def admin_poll_start(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    """Запуск опроса для всех игроков лиги."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    # Получаем лигу администратора
+    league = await _get_admin_league(call, session)
+    if not league:
+        await call.message.edit_text("❌ Лига не найдена.")
+        return
+
+    # Считаем активных игроков
+    result = await session.execute(
+        select(Player)
+        .where(Player.league_id == league.id, Player.status == PlayerStatus.ACTIVE)
+    )
+    players = result.scalars().all()
+    if not players:
+        await call.message.edit_text(
+            "⚠️ В лиге нет активных игроков.",
+            reply_markup=_poll_cancel_kb("admin_back")
+        )
+        return
+
+    await state.set_state(PollFSM.waiting_question)
+    await state.update_data(target="league", league_id=league.id)
+
+    await call.message.edit_text(
+        f"📢 <b>Опрос для лиги «{league.name}»</b>\n\n"
+        f"👥 Получателей: <b>{len(players)}</b>\n\n"
+        "✏️ Введи <b>вопрос</b> для опроса:",
+        reply_markup=_poll_cancel_kb("admin_back")
+    )
+
+
+@router.message(StateFilter(PollFSM.waiting_question))
+async def poll_got_question(message: Message, state: FSMContext):
+    """Получили вопрос — просим варианты ответов."""
+    question = message.text.strip()
+    if len(question) < 3:
+        await message.answer("❗ Вопрос слишком короткий. Попробуй ещё раз:")
+        return
+    if len(question) > 300:
+        await message.answer("❗ Вопрос слишком длинный (макс. 300 символов). Попробуй ещё раз:")
+        return
+
+    await state.update_data(question=question)
+    await state.set_state(PollFSM.waiting_options)
+
+    await message.answer(
+        f"✅ Вопрос: <i>{question}</i>\n\n"
+        "📝 Теперь введи <b>варианты ответов</b> — каждый с новой строки.\n"
+        "<i>Минимум 2 варианта, максимум 10.</i>\n\n"
+        "Пример:\n"
+        "Да\n"
+        "Нет\n"
+        "Может быть",
+        reply_markup=_poll_cancel_kb("admin_back")
+    )
+
+
+@router.message(StateFilter(PollFSM.waiting_options))
+async def poll_got_options(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
+    """Получили варианты — отправляем native Telegram poll."""
+    raw = message.text.strip()
+    options = [line.strip() for line in raw.splitlines() if line.strip()]
+
+    if len(options) < 2:
+        await message.answer("❗ Нужно минимум 2 варианта ответа. Попробуй ещё раз:")
+        return
+    if len(options) > 10:
+        await message.answer("❗ Максимум 10 вариантов. Попробуй ещё раз:")
+        return
+    for opt in options:
+        if len(opt) > 100:
+            await message.answer(f"❗ Вариант слишком длинный (макс. 100 символов):\n«{opt[:50]}…»")
+            return
+
+    data = await state.get_data()
+    question = data["question"]
+    target = data.get("target", "league")
+    await state.clear()
+
+    # Собираем список получателей
+    recipients: list[Player] = []
+
+    if target == "game_day":
+        game_day_id = data["game_day_id"]
+        result = await session.execute(
+            select(Attendance)
+            .options(selectinload(Attendance.player))
+            .where(
+                Attendance.game_day_id == game_day_id,
+                Attendance.response == AttendanceResponse.YES,
+            )
+        )
+        recipients = [att.player for att in result.scalars().all() if att.player]
+    else:
+        league_id = data.get("league_id")
+        if league_id:
+            result = await session.execute(
+                select(Player).where(
+                    Player.league_id == league_id,
+                    Player.status == PlayerStatus.ACTIVE,
+                )
+            )
+            recipients = result.scalars().all()
+
+    if not recipients:
+        await message.answer("⚠️ Список получателей пуст. Опрос не отправлен.")
+        return
+
+    # Рассылаем
+    sent = 0
+    failed = 0
+    for player in recipients:
+        try:
+            await bot.send_poll(
+                chat_id=player.telegram_id,
+                question=question,
+                options=options,
+                is_anonymous=True,
+            )
+            sent += 1
+        except Exception as e:
+            logger.warning(f"poll: не удалось отправить игроку {player.telegram_id}: {e}")
+            failed += 1
+
+    summary = (
+        f"✅ Опрос разослан!\n\n"
+        f"📨 Отправлено: <b>{sent}</b>\n"
+    )
+    if failed:
+        summary += f"❌ Ошибки: <b>{failed}</b>"
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🔙 Меню", callback_data="admin_back"))
+    await message.answer(summary, reply_markup=builder.as_markup())

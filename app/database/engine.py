@@ -168,6 +168,7 @@ async def _run_migrations(conn):
         await conn.execute(text(
             "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS card_number VARCHAR(50)"
         ))
+        # user_activity создаётся через Base.metadata.create_all — дополнительных миграций не требуется
 
 
 async def _run_enum_migrations(conn) -> None:
