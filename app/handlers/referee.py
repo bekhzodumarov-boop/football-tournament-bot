@@ -359,7 +359,7 @@ async def ref_team1(message: Message, state: FSMContext, session: AsyncSession):
         f"Шаг 2 из 5\n\n"
         f"👥 Выбери игроков <b>{name}</b> из записавшихся на игру:\n"
         f"<i>Нажимай на имена, потом «Готово»</i>",
-        reply_markup=team_players_select_kb(available, [], name)
+        reply_markup=team_players_select_kb(available, [], name, data["game_day_id"])
     )
 
 
@@ -402,7 +402,7 @@ async def ref_toggle_player(call: CallbackQuery, state: FSMContext,
         team_name = data.get("team2_name", "Команда 2")
 
     await call.message.edit_reply_markup(
-        reply_markup=team_players_select_kb(available, selected, team_name)
+        reply_markup=team_players_select_kb(available, selected, team_name, data.get("game_day_id", 0))
     )
     await call.answer()
 
@@ -495,7 +495,7 @@ async def ref_team_players_done(call: CallbackQuery, state: FSMContext,
         await call.message.edit_text(
             f"✅ <b>{team2_name}</b>: {len(selected)} игроков выбрано\n\n"
             f"Шаг 5 из 6\n\nВыбери <b>стадию матча</b>:",
-            reply_markup=pick_stage_kb()
+            reply_markup=pick_stage_kb(data.get("game_day_id", 0))
         )
 
 
@@ -520,7 +520,7 @@ async def ref_team2(message: Message, state: FSMContext):
         f"Шаг 4 из 5\n\n"
         f"👥 Выбери игроков <b>{name}</b>:\n"
         f"<i>Нажимай на имена, потом «Готово»</i>",
-        reply_markup=team_players_select_kb(available, [], name)
+        reply_markup=team_players_select_kb(available, [], name, data["game_day_id"])
     )
 
 
@@ -1202,6 +1202,39 @@ async def referee_fsm_cancel(message: Message, state: FSMContext):
     )
 
 
+@router.callback_query(F.data.startswith("ref_cancel_new_match:"))
+async def ref_cancel_new_match(call: CallbackQuery, state: FSMContext,
+                               player: Player | None, session: AsyncSession):
+    """Отмена создания матча / настройки команды → возврат к панели игрового дня."""
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    await state.clear()
+
+    # Показать панель игрового дня
+    gd = await session.get(GameDay, game_day_id)
+    if not gd:
+        await call.message.edit_text("❌ Игровой день не найден.")
+        return
+
+    matches_result = await session.execute(
+        select(Match)
+        .options(selectinload(Match.team_home), selectinload(Match.team_away))
+        .where(Match.game_day_id == game_day_id)
+        .order_by(Match.match_order, Match.id)
+    )
+    matches = matches_result.scalars().all()
+
+    await call.message.edit_text(
+        f"📅 <b>{gd.scheduled_at.strftime('%d.%m.%Y %H:%M')}</b> — {gd.location}\n"
+        f"Матчей: {len(matches)}",
+        reply_markup=referee_gd_kb(game_day_id, matches)
+    )
+
+
 # ─────────────────────────────────────────────
 #  Выбор стадии матча
 # ─────────────────────────────────────────────
@@ -1220,10 +1253,11 @@ async def ref_pick_stage(call: CallbackQuery, state: FSMContext, player: Player 
     await state.update_data(match_stage_val=stage_str)
     await state.set_state(RefereeMatchFSM.waiting_format)
 
+    data = await state.get_data()
     stage_label = MATCH_STAGE_LABELS.get(MatchStage(stage_str), stage_str)
     await call.message.edit_text(
         f"✅ Стадия: <b>{stage_label}</b>\n\nВыбери формат матча:",
-        reply_markup=pick_format_kb()
+        reply_markup=pick_format_kb(data.get("game_day_id", 0))
     )
 
 
@@ -1335,7 +1369,7 @@ async def ref_pick_team2(call: CallbackQuery, state: FSMContext,
     await call.message.edit_text(
         f"✅ {team1.color_emoji} {team1.name} vs {team2.color_emoji} {team2.name}\n\n"
         "Шаг 3 из 4\n\nВыбери <b>стадию матча</b>:",
-        reply_markup=pick_stage_kb()
+        reply_markup=pick_stage_kb(data.get("game_day_id", 0))
     )
 
 
@@ -1448,7 +1482,7 @@ async def ref_setup_team_name(message: Message, state: FSMContext,
         f"✅ Название: <b>{name}</b>\n\n"
         "👥 Выбери игроков этой команды из записавшихся:\n"
         "<i>Нажимай имена, потом «Готово»</i>",
-        reply_markup=team_players_select_kb(available, [], name)
+        reply_markup=team_players_select_kb(available, [], name, data["game_day_id"])
     )
 
 

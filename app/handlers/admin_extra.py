@@ -63,6 +63,10 @@ class RenameTeamsFSM(StatesGroup):
     waiting_new_name = State()
 
 
+class AdminCardFSM(StatesGroup):
+    waiting_card_number = State()
+
+
 class ScheduleFSM(StatesGroup):
     waiting_team1 = State()
     waiting_team2 = State()
@@ -2969,4 +2973,140 @@ async def gd_sched_finals(call: CallbackQuery, session: AsyncSession):
         reply_markup=InlineKeyboardBuilder().row(
             InlineKeyboardButton(text="📅 Сетка турнира", callback_data=f"gd_schedule:{game_day_id}")
         ).as_markup()
+    )
+
+
+# ══════════════════════════════════════════════════════
+#  УПРАВЛЕНИЕ БАНКОВСКОЙ КАРТОЙ
+# ══════════════════════════════════════════════════════
+
+async def _get_admin_league(call: CallbackQuery, session: AsyncSession):
+    """Получить лигу текущего администратора."""
+    p_res = await session.execute(
+        select(Player).where(Player.telegram_id == call.from_user.id)
+    )
+    admin_player = p_res.scalar_one_or_none()
+    if not admin_player or not admin_player.league_id:
+        return None
+    return await session.get(League, admin_player.league_id)
+
+
+def _card_kb(has_card: bool) -> "InlineKeyboardMarkup":
+    builder = InlineKeyboardBuilder()
+    if has_card:
+        builder.row(InlineKeyboardButton(text="✏️ Изменить карту", callback_data="admin_card_edit"))
+        builder.row(InlineKeyboardButton(text="🗑 Удалить карту", callback_data="admin_card_delete"))
+    else:
+        builder.row(InlineKeyboardButton(text="➕ Добавить карту", callback_data="admin_card_edit"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back"))
+    return builder.as_markup()
+
+
+@router.callback_query(F.data == "admin_card")
+async def admin_card_view(call: CallbackQuery, session: AsyncSession):
+    """Показать текущую банковскую карту лиги."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    league = await _get_admin_league(call, session)
+    if not league:
+        await call.message.edit_text("❌ Лига не найдена.", reply_markup=_card_kb(False))
+        return
+
+    if league.card_number:
+        text = (
+            f"💳 <b>Банковская карта</b>\n\n"
+            f"Текущий номер карты:\n<code>{league.card_number}</code>\n\n"
+            "Этот номер отправляется игрокам при рассылке финансового итога."
+        )
+    else:
+        text = (
+            "💳 <b>Банковская карта</b>\n\n"
+            "Карта пока не добавлена.\n\n"
+            "Добавь номер карты — он будет отправляться игрокам при рассылке финансового итога."
+        )
+
+    await call.message.edit_text(text, reply_markup=_card_kb(bool(league.card_number)))
+
+
+@router.callback_query(F.data == "admin_card_edit")
+async def admin_card_edit_start(call: CallbackQuery, state: FSMContext):
+    """Начать ввод нового номера карты."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    await state.set_state(AdminCardFSM.waiting_card_number)
+    cancel_kb = InlineKeyboardBuilder()
+    cancel_kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_card"))
+    await call.message.edit_text(
+        "💳 <b>Введи номер банковской карты</b>\n\n"
+        "Например: <code>4276 1234 5678 9012</code>\n\n"
+        "<i>Игроки увидят его как копируемый текст при запросе оплаты.</i>",
+        reply_markup=cancel_kb.as_markup()
+    )
+
+
+@router.message(StateFilter(AdminCardFSM.waiting_card_number))
+async def admin_card_save(message: Message, state: FSMContext, session: AsyncSession):
+    """Сохранить новый номер карты."""
+    if not settings.is_admin(message.from_user.id):
+        return
+
+    card = message.text.strip() if message.text else ""
+    if not card:
+        await message.answer("❌ Введи номер карты:")
+        return
+
+    p_res = await session.execute(
+        select(Player).where(Player.telegram_id == message.from_user.id)
+    )
+    admin_player = p_res.scalar_one_or_none()
+    if not admin_player or not admin_player.league_id:
+        await message.answer("❌ Лига не найдена.")
+        await state.clear()
+        return
+
+    league = await session.get(League, admin_player.league_id)
+    if not league:
+        await message.answer("❌ Лига не найдена.")
+        await state.clear()
+        return
+
+    league.card_number = card
+    await session.commit()
+    await state.clear()
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="💳 Моя карта", callback_data="admin_card"))
+    builder.row(InlineKeyboardButton(text="🔙 Меню", callback_data="admin_back"))
+    await message.answer(
+        f"✅ Номер карты сохранён:\n<code>{card}</code>",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data == "admin_card_delete")
+async def admin_card_delete(call: CallbackQuery, session: AsyncSession):
+    """Удалить номер карты из лиги."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    league = await _get_admin_league(call, session)
+    if not league:
+        await call.message.edit_text("❌ Лига не найдена.")
+        return
+
+    league.card_number = None
+    await session.commit()
+
+    await call.message.edit_text(
+        "🗑 Номер карты удалён.\n\n"
+        "Теперь при рассылке финансового итога бот будет спрашивать номер карты каждый раз.",
+        reply_markup=_card_kb(False)
     )

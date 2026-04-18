@@ -19,6 +19,9 @@ def join_game_kb(game_day_id: int, is_open: bool, lang: str = "ru") -> InlineKey
         builder.row(
             InlineKeyboardButton(text="🔒 Набор закрыт", callback_data="closed"),
         )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu"),
+    )
     return builder.as_markup()
 
 

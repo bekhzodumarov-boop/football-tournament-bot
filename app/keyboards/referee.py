@@ -133,6 +133,7 @@ def team_players_select_kb(
     players: list[dict],   # [{"id": int, "name": str}, ...]
     selected_ids: list[int],
     team_name: str,
+    game_day_id: int = 0,
 ) -> InlineKeyboardMarkup:
     """Мультивыбор игроков для команды во время создания матча."""
     builder = InlineKeyboardBuilder()
@@ -153,6 +154,11 @@ def team_players_select_kb(
         builder.row(InlineKeyboardButton(
             text="⚠️ Выбери хотя бы одного игрока",
             callback_data="noop",
+        ))
+    if game_day_id:
+        builder.row(InlineKeyboardButton(
+            text="🔙 Отмена",
+            callback_data=f"ref_cancel_new_match:{game_day_id}",
         ))
     return builder.as_markup()
 
@@ -218,17 +224,21 @@ def sub_player_in_kb(match_id: int, team_id: int, player_out_id: int,
     return builder.as_markup()
 
 
-def pick_format_kb() -> InlineKeyboardMarkup:
+def pick_format_kb(game_day_id: int = 0) -> InlineKeyboardMarkup:
     """Выбор формата матча: по времени или до N голов."""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="⏱ По времени", callback_data="ref_fmt:time"),
         InlineKeyboardButton(text="🥅 До N голов", callback_data="ref_fmt:goals"),
     )
+    if game_day_id:
+        builder.row(InlineKeyboardButton(
+            text="🔙 Назад", callback_data=f"ref_cancel_new_match:{game_day_id}"
+        ))
     return builder.as_markup()
 
 
-def pick_stage_kb() -> InlineKeyboardMarkup:
+def pick_stage_kb(game_day_id: int = 0) -> InlineKeyboardMarkup:
     """Выбор стадии матча (групповой / плей-офф)."""
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -239,4 +249,8 @@ def pick_stage_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🥉 Матч за 3 место", callback_data="ref_stage:third_place"),
         InlineKeyboardButton(text="🏆🏆 Финал", callback_data="ref_stage:final"),
     )
+    if game_day_id:
+        builder.row(InlineKeyboardButton(
+            text="🔙 Назад", callback_data=f"ref_cancel_new_match:{game_day_id}"
+        ))
     return builder.as_markup()
