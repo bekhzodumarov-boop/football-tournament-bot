@@ -32,6 +32,7 @@ async def cmd_cancel(message: Message, state: FSMContext):
     )
 
 
+@router.message(CommandStart())
 async def cmd_start(message: Message, player: Player | None, state: FSMContext,
                     session: AsyncSession, command: CommandObject = None):
     await state.clear()
