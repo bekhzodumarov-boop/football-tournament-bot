@@ -38,6 +38,7 @@ class FinancialSummaryFSM(StatesGroup):
     waiting_expenses = State()
     waiting_players_count = State()
     waiting_confirm = State()
+    waiting_card = State()
 
 
 class CreateLeagueFSM(StatesGroup):
@@ -56,6 +57,10 @@ class RatingVoteFSM(StatesGroup):
 
 class AutoTeamsFSM(StatesGroup):
     waiting_num_teams = State()
+
+
+class RenameTeamsFSM(StatesGroup):
+    waiting_new_name = State()
 
 
 class ScheduleFSM(StatesGroup):
@@ -413,13 +418,85 @@ async def gd_finance_manual_cost(message: Message, state: FSMContext,
 
 
 @router.callback_query(F.data == "fin_confirm")
-async def gd_finance_confirm(call: CallbackQuery, state: FSMContext,
-                              session: AsyncSession, bot: Bot):
+async def gd_finance_confirm(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    """После подтверждения суммы — спрашиваем номер карты."""
     await call.answer()
-    await _broadcast_finance(call.message, state, session, bot)
+
+    data = await state.get_data()
+    game_day_id = data["game_day_id"]
+
+    # Ищем лигу игрового дня — может быть сохранённый номер карты
+    game_day = await session.get(GameDay, game_day_id)
+    league = await session.get(League, game_day.league_id) if game_day and game_day.league_id else None
+    saved_card = league.card_number if league else None
+
+    await state.set_state(FinancialSummaryFSM.waiting_card)
+
+    kb = InlineKeyboardBuilder()
+    if saved_card:
+        kb.row(InlineKeyboardButton(
+            text=f"✅ Использовать {saved_card}",
+            callback_data=f"fin_use_card:{saved_card}"
+        ))
+        kb.row(InlineKeyboardButton(
+            text="📲 Другая карта",
+            callback_data="fin_new_card"
+        ))
+    else:
+        kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back"))
+
+    if saved_card:
+        prompt = (
+            f"💳 <b>Номер карты для оплаты</b>\n\n"
+            f"Сохранённая карта: <code>{saved_card}</code>\n\n"
+            "Использовать эту карту или ввести другую?"
+        )
+    else:
+        prompt = (
+            "💳 <b>Введите номер карты</b>\n\n"
+            "На какую карту игроки должны переводить взнос?\n"
+            "<i>Например: 8600 1234 5678 9012</i>"
+        )
+
+    await call.message.edit_text(prompt, reply_markup=kb.as_markup())
 
 
-async def _broadcast_finance(msg, state: FSMContext, session: AsyncSession, bot: Bot):
+@router.callback_query(F.data.startswith("fin_use_card:"))
+async def fin_use_saved_card(call: CallbackQuery, state: FSMContext,
+                              session: AsyncSession, bot: Bot):
+    """Использовать ранее сохранённую карту."""
+    await call.answer()
+    card_number = call.data.split(":", 1)[1]
+    await _broadcast_finance(call.message, state, session, bot, card_number)
+
+
+@router.callback_query(F.data == "fin_new_card")
+async def fin_new_card_prompt(call: CallbackQuery, state: FSMContext):
+    """Запросить новый номер карты."""
+    await call.answer()
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back"))
+    await call.message.edit_text(
+        "📲 <b>Введите новый номер карты:</b>\n<i>Например: 8600 1234 5678 9012</i>",
+        reply_markup=kb.as_markup()
+    )
+
+
+@router.message(StateFilter(FinancialSummaryFSM.waiting_card))
+async def fin_card_entered(message: Message, state: FSMContext,
+                           session: AsyncSession, bot: Bot):
+    """Администратор ввёл номер карты вручную."""
+    if not settings.is_admin(message.from_user.id):
+        return
+    card_number = message.text.strip()
+    if len(card_number) < 4:
+        await message.answer("❌ Похоже, это не номер карты. Введи ещё раз:")
+        return
+    await _broadcast_finance(message, state, session, bot, card_number)
+
+
+async def _broadcast_finance(msg, state: FSMContext, session: AsyncSession,
+                              bot: Bot, card_number: str):
     data = await state.get_data()
     await state.clear()
 
@@ -436,27 +513,39 @@ async def _broadcast_finance(msg, state: FSMContext, session: AsyncSession, bot:
     game_day.cost_per_player = cost_per
     await session.commit()
 
+    # Сохраняем номер карты в лигу
+    if game_day.league_id:
+        league = await session.get(League, game_day.league_id)
+        if league:
+            league.card_number = card_number
+            await session.commit()
+
     attendees = [a for a in game_day.attendances if a.response == AttendanceResponse.YES]
 
     sent = 0
     for att in attendees:
+        p = att.player
+        if not p:
+            continue
         try:
-            lang = getattr(att.player, 'language', None) or 'ru'
-            text = t('finance_notice', lang,
-                     game_name=game_day.display_name,
-                     date=game_day.scheduled_at.strftime('%d.%m.%Y'),
-                     location=game_day.location,
-                     amount=f"{cost_per:,}")
-            await bot.send_message(att.player.telegram_id, text)
+            lang = getattr(p, 'language', None) or 'ru'
+            base_text = t('finance_notice', lang,
+                          game_name=game_day.display_name,
+                          date=game_day.scheduled_at.strftime('%d.%m.%Y'),
+                          location=game_day.location,
+                          amount=f"{cost_per:,}")
+            card_line = f"\n\n💳 <b>Номер карты для оплаты:</b>\n<code>{card_number}</code>"
+            await bot.send_message(p.telegram_id, base_text + card_line)
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            logger.warning(f"Cannot send finance notice to {att.player.telegram_id}: {e}")
+            logger.warning(f"Cannot send finance notice to {p.telegram_id}: {e}")
 
     from app.keyboards.main_menu import admin_menu_kb
     await msg.answer(
         f"✅ <b>Финансовый итог отправлен!</b>\n\n"
         f"💰 Взнос: {cost_per:,} сум.\n"
+        f"💳 Карта: <code>{card_number}</code>\n"
         f"📨 Уведомлено: {sent} игроков",
         reply_markup=admin_menu_kb()
     )
@@ -1301,8 +1390,8 @@ async def gd_rating_close(call: CallbackQuery, session: AsyncSession):
 #  АВТО-КОМАНДЫ (балансировка по рейтингу + позиции)
 # ══════════════════════════════════════════════════════
 
-TEAM_COLORS = ["🔴", "🔵", "🟡", "🟢", "🟠", "🟣", "⚪", "⚫"]
-TEAM_NAMES  = ["A",   "B",   "C",   "D",   "E",   "F",   "G",   "H"]
+TEAM_COLORS = ["🔴", "🟡", "🔵", "🟢", "🟠", "🟣", "⚪", "⚫"]
+TEAM_NAMES  = ["Reds", "Golden", "Blue", "Green", "E", "F", "G", "H"]
 
 
 @router.callback_query(F.data.startswith("gd_auto_teams:"))
@@ -1739,6 +1828,120 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
 
     # Показать сводку Админу (новым сообщением — надёжнее edit_text)
     await call.message.answer(full_summary, reply_markup=game_day_action_kb(game_day_id))
+
+
+# ══════════════════════════════════════════════════════
+#  ПЕРЕИМЕНОВАНИЕ КОМАНД
+# ══════════════════════════════════════════════════════
+
+def _teams_rename_kb(game_day_id: int, teams: list) -> object:
+    """Клавиатура со списком команд для переименования."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    for team in teams:
+        builder.row(InlineKeyboardButton(
+            text=f"{team.color_emoji} {team.name}",
+            callback_data=f"rename_team_pick:{game_day_id}:{team.id}"
+        ))
+    builder.row(InlineKeyboardButton(
+        text="🔙 К игровому дню",
+        callback_data=f"gd_players:{game_day_id}"
+    ))
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("gd_rename_teams:"))
+async def gd_rename_teams(call: CallbackQuery, session: AsyncSession):
+    """Список команд — выбери, какую переименовать."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    teams_res = await session.execute(
+        select(Team).where(Team.game_day_id == game_day_id).order_by(Team.id)
+    )
+    teams = teams_res.scalars().all()
+    if not teams:
+        await call.answer("⚠️ Команды ещё не созданы.", show_alert=True)
+        return
+
+    await call.message.edit_text(
+        "✏️ <b>Переименование команд</b>\n\nВыбери команду, название которой хочешь изменить:",
+        reply_markup=_teams_rename_kb(game_day_id, teams)
+    )
+
+
+@router.callback_query(F.data.startswith("rename_team_pick:"))
+async def rename_team_pick(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    """Выбрана конкретная команда — просим новое название."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    _, game_day_id_str, team_id_str = call.data.split(":")
+    game_day_id = int(game_day_id_str)
+    team_id = int(team_id_str)
+
+    team = await session.get(Team, team_id)
+    if not team:
+        await call.answer("❌ Команда не найдена.", show_alert=True)
+        return
+
+    await state.update_data(game_day_id=game_day_id, team_id=team_id)
+    await state.set_state(RenameTeamsFSM.waiting_new_name)
+
+    cancel_kb = InlineKeyboardBuilder()
+    cancel_kb.row(InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data=f"gd_rename_teams:{game_day_id}"
+    ))
+
+    await call.message.edit_text(
+        f"✏️ Переименование команды <b>{team.color_emoji} {team.name}</b>\n\n"
+        f"Введи новое название (например: Sharks, Волки, Dream Team):",
+        reply_markup=cancel_kb.as_markup()
+    )
+
+
+@router.message(StateFilter(RenameTeamsFSM.waiting_new_name))
+async def rename_team_save(message: Message, state: FSMContext, session: AsyncSession):
+    """Сохраняем новое название команды."""
+    if not settings.is_admin(message.from_user.id):
+        return
+
+    new_name = message.text.strip()
+    if len(new_name) < 1 or len(new_name) > 30:
+        await message.answer("❌ Название должно быть от 1 до 30 символов. Попробуй ещё раз:")
+        return
+
+    data = await state.get_data()
+    game_day_id = data["game_day_id"]
+    team_id = data["team_id"]
+    await state.clear()
+
+    team = await session.get(Team, team_id)
+    if not team:
+        await message.answer("❌ Команда не найдена.")
+        return
+
+    old_name = team.name
+    team.name = new_name
+    await session.commit()
+
+    # Показываем обновлённый список
+    teams_res = await session.execute(
+        select(Team).where(Team.game_day_id == game_day_id).order_by(Team.id)
+    )
+    teams = teams_res.scalars().all()
+
+    await message.answer(
+        f"✅ Команда <b>{team.color_emoji} {old_name}</b> переименована в <b>{team.color_emoji} {new_name}</b>!\n\n"
+        "Выбери следующую команду или вернись к игровому дню:",
+        reply_markup=_teams_rename_kb(game_day_id, teams)
+    )
 
 
 # ══════════════════════════════════════════════════════

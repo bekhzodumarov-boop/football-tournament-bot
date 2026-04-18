@@ -97,6 +97,7 @@ class League(Base):
     invite_code: Mapped[str] = mapped_column(String(10), unique=True, index=True)
     admin_telegram_id: Mapped[int] = mapped_column(BigInteger)
     city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    card_number: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

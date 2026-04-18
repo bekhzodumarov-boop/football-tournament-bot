@@ -117,6 +117,13 @@ async def _run_migrations(conn):
             await conn.execute(text(
                 "ALTER TABLE matches ADD COLUMN match_order INTEGER DEFAULT 0"
             ))
+
+        result7 = await conn.execute(text("PRAGMA table_info(leagues)"))
+        league_cols = [row[1] for row in result7.fetchall()]
+        if "card_number" not in league_cols:
+            await conn.execute(text(
+                "ALTER TABLE leagues ADD COLUMN card_number VARCHAR(50)"
+            ))
     else:
         # PostgreSQL
         await conn.execute(text(
@@ -157,6 +164,9 @@ async def _run_migrations(conn):
         ))
         await conn.execute(text(
             "ALTER TABLE matches ADD COLUMN IF NOT EXISTS match_order INTEGER DEFAULT 0"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS card_number VARCHAR(50)"
         ))
 
 
