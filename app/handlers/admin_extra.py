@@ -26,7 +26,7 @@ from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
     Player, PlayerStatus, Match, MatchStatus, Goal, GoalType, Card, League,
-    RatingRound, RatingVote, Team, TeamPlayer,
+    RatingRound, RatingVote, Team, TeamPlayer, PlayerLeague, LeagueRole,
 )
 from app.database.models import _gen_invite_code
 from app.locales.texts import t, goals_word as gw
@@ -750,6 +750,19 @@ async def _finish_create_league(msg, state: FSMContext, session: AsyncSession,
     creator = p_res.scalar_one_or_none()
     if creator:
         creator.league_id = league.id
+        # Создать PlayerLeague с ролью ADMIN
+        existing_pl = await session.execute(
+            select(PlayerLeague).where(
+                PlayerLeague.player_id == creator.id,
+                PlayerLeague.league_id == league.id,
+            )
+        )
+        if existing_pl.scalar_one_or_none() is None:
+            session.add(PlayerLeague(
+                player_id=creator.id,
+                league_id=league.id,
+                role=LeagueRole.ADMIN,
+            ))
 
     await session.commit()
 

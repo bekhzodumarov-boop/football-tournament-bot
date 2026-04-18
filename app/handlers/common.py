@@ -10,13 +10,47 @@ from app.config import settings
 from app.database.models import (
     Player, POSITION_LABELS,
     GameDay, GameDayStatus, Match, MatchStatus, Team, TeamPlayer, League,
-    Goal, GoalType, Card, CardType,
+    Goal, GoalType, Card, CardType, PlayerLeague, LeagueRole,
 )
 from app.keyboards.main_menu import main_menu_kb, admin_menu_kb, language_kb, instructions_kb
 from app.locales.texts import t
 from app.locales.instructions import INSTRUCTION_PLAYER, INSTRUCTION_REFEREE, INSTRUCTION_ADMIN
 
 router = Router()
+
+
+async def _is_league_admin(player: Player | None, session: AsyncSession) -> bool:
+    """Проверяет, является ли игрок администратором хотя бы одной лиги."""
+    if player is None:
+        return False
+    if settings.is_admin(player.telegram_id):
+        return True
+    result = await session.execute(
+        select(PlayerLeague).where(
+            PlayerLeague.player_id == player.id,
+            PlayerLeague.role == LeagueRole.ADMIN,
+        ).limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def _ensure_player_league(session: AsyncSession, player: Player, league: League, role: LeagueRole = LeagueRole.PLAYER) -> None:
+    """Создаёт запись PlayerLeague если её нет, иначе обновляет роль если нужно."""
+    existing = await session.execute(
+        select(PlayerLeague).where(
+            PlayerLeague.player_id == player.id,
+            PlayerLeague.league_id == league.id,
+        )
+    )
+    pl = existing.scalar_one_or_none()
+    if pl is None:
+        session.add(PlayerLeague(
+            player_id=player.id,
+            league_id=league.id,
+            role=role,
+        ))
+    elif role == LeagueRole.ADMIN and pl.role != LeagueRole.ADMIN:
+        pl.role = LeagueRole.ADMIN
 
 
 @router.message(Command("cancel"))
@@ -69,7 +103,8 @@ async def cmd_start(message: Message, player: Player | None, state: FSMContext,
              balance=player.balance)
     text += hint
 
-    await message.answer(text, reply_markup=main_menu_kb(lang))
+    is_admin = await _is_league_admin(player, session)
+    await message.answer(text, reply_markup=main_menu_kb(lang, is_admin=is_admin))
 
 
 async def _handle_invite_link(
@@ -95,20 +130,46 @@ async def _handle_invite_link(
     lang = (getattr(player, 'language', None) or 'ru') if player else 'ru'
 
     if player is not None:
-        # Уже зарегистрирован — просто привязать к лиге
-        if player.league_id == league.id:
+        # Проверить — уже в этой лиге?
+        already = await session.execute(
+            select(PlayerLeague).where(
+                PlayerLeague.player_id == player.id,
+                PlayerLeague.league_id == league.id,
+            )
+        )
+        if already.scalar_one_or_none() is not None:
+            is_admin = await _is_league_admin(player, session)
             await message.answer(
                 f"✅ Ты уже в лиге <b>{league.name}</b>!",
-                reply_markup=main_menu_kb(lang)
+                reply_markup=main_menu_kb(lang, is_admin=is_admin)
             )
         else:
+            # Если у лиги есть пароль — сохранить код и попросить пароль
+            if league.password:
+                from aiogram.fsm.context import FSMContext
+                from app.handlers.registration import JoinLeagueFSM
+                await state.set_state(JoinLeagueFSM.waiting_password)
+                await state.update_data(join_league_id=league.id, join_league_name=league.name)
+                from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+                from aiogram.types import InlineKeyboardButton as IKBBtn
+                kb = IKB()
+                kb.row(IKBBtn(text="❌ Отмена", callback_data="main_menu"))
+                await message.answer(
+                    f"🔒 Лига <b>{league.name}</b> защищена паролем.\n\n"
+                    "Введи пароль для вступления:",
+                    reply_markup=kb.as_markup()
+                )
+                return
+
             player.league_id = league.id
+            await _ensure_player_league(session, player, league, LeagueRole.PLAYER)
             await session.commit()
+            is_admin = await _is_league_admin(player, session)
             await message.answer(
                 f"🎉 Ты вступил в лигу <b>{league.name}</b>!\n\n"
                 f"📍 {league.city or ''}\n\n"
                 "Теперь ты видишь игры и статистику своей лиги.",
-                reply_markup=main_menu_kb(lang)
+                reply_markup=main_menu_kb(lang, is_admin=is_admin)
             )
     else:
         # Не зарегистрирован — сохранить код и попросить зарегистрироваться
@@ -181,16 +242,110 @@ async def cmd_admin(message: Message, player: Player | None, state: FSMContext,
 
 
 @router.callback_query(lambda c: c.data == "main_menu")
-async def cb_main_menu(call: CallbackQuery, player: Player | None):
+async def cb_main_menu(call: CallbackQuery, player: Player | None, session: AsyncSession):
     await call.answer()
     if player is None:
         await call.message.answer("Ты не зарегистрирован. Нажми /register")
         return
 
     lang = getattr(player, 'language', None) or 'ru'
+    is_admin = await _is_league_admin(player, session)
     await call.message.edit_text(
         f"⚽ Главное меню, <b>{player.name}</b>:",
-        reply_markup=main_menu_kb(lang)
+        reply_markup=main_menu_kb(lang, is_admin=is_admin)
+    )
+
+
+@router.callback_query(lambda c: c.data == "my_leagues")
+async def cb_my_leagues(call: CallbackQuery, player: Player | None, session: AsyncSession):
+    await call.answer()
+    if not player:
+        await call.message.answer("Ты не зарегистрирован. Нажми /register")
+        return
+
+    lang = getattr(player, 'language', None) or 'ru'
+
+    # Получить все лиги игрока с ролями
+    result = await session.execute(
+        select(PlayerLeague)
+        .options(selectinload(PlayerLeague.league))
+        .where(PlayerLeague.player_id == player.id)
+        .order_by(PlayerLeague.joined_at)
+    )
+    memberships = result.scalars().all()
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+    from aiogram.types import InlineKeyboardButton as IKBBtn
+
+    kb = IKB()
+
+    if not memberships:
+        text = (
+            "🏆 <b>Мои лиги</b>\n\n"
+            "Ты пока не состоишь ни в одной лиге.\n\n"
+            "Вступи по инвайт-ссылке или создай свою лигу:"
+        )
+        kb.row(IKBBtn(text="➕ Создать лигу", callback_data="cmd_create_league"))
+        kb.row(IKBBtn(text="🔙 Главное меню", callback_data="main_menu"))
+        await call.message.edit_text(text, reply_markup=kb.as_markup())
+        return
+
+    lines = ["🏆 <b>Мои лиги</b>\n"]
+    for pl in memberships:
+        league = pl.league
+        if not league or not league.is_active:
+            continue
+        role_label = "👑 Администратор" if pl.role == LeagueRole.ADMIN else "👤 Игрок"
+        active_mark = " ✅" if league.id == player.league_id else ""
+        city = f" • {league.city}" if league.city else ""
+        lines.append(f"<b>{league.name}</b>{city} — {role_label}{active_mark}")
+
+        # Кнопка переключения (если не активная лига)
+        if league.id != player.league_id:
+            kb.row(IKBBtn(
+                text=f"🔄 Переключиться: {league.name}",
+                callback_data=f"switch_league:{league.id}"
+            ))
+
+    lines.append("\n✅ — активная лига (твои игры и статистика)")
+    kb.row(IKBBtn(text="➕ Создать лигу", callback_data="cmd_create_league"))
+    kb.row(IKBBtn(text="🔙 Главное меню", callback_data="main_menu"))
+
+    await call.message.edit_text("\n".join(lines), reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("switch_league:"))
+async def cb_switch_league(call: CallbackQuery, player: Player | None, session: AsyncSession):
+    await call.answer()
+    if not player:
+        return
+
+    league_id = int(call.data.split(":")[1])
+    lang = getattr(player, 'language', None) or 'ru'
+
+    # Проверить — игрок состоит в этой лиге?
+    pl_result = await session.execute(
+        select(PlayerLeague)
+        .options(selectinload(PlayerLeague.league))
+        .where(
+            PlayerLeague.player_id == player.id,
+            PlayerLeague.league_id == league_id,
+        )
+    )
+    membership = pl_result.scalar_one_or_none()
+
+    if not membership or not membership.league or not membership.league.is_active:
+        await call.message.answer("❌ Лига не найдена или недоступна.")
+        return
+
+    player.league_id = league_id
+    await session.commit()
+
+    is_admin = await _is_league_admin(player, session)
+    await call.message.edit_text(
+        f"✅ Активная лига изменена на <b>{membership.league.name}</b>!\n\n"
+        "Теперь ты видишь игры и статистику этой лиги.",
+        reply_markup=main_menu_kb(lang, is_admin=is_admin)
     )
 
 
@@ -520,7 +675,8 @@ async def cb_set_language(call: CallbackQuery, player: Player | None, session: A
         'ru': 'lang_set_ru', 'en': 'lang_set_en',
         'uz': 'lang_set_uz', 'de': 'lang_set_de',
     }.get(new_lang, 'lang_set_ru')
-    await call.message.answer(t(key, new_lang), reply_markup=main_menu_kb(new_lang))
+    is_admin = await _is_league_admin(player, session)
+    await call.message.answer(t(key, new_lang), reply_markup=main_menu_kb(new_lang, is_admin=is_admin))
 
 
 # ── My Team (I-040) ──────────────────────────────────────────────────────────

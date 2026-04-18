@@ -5,7 +5,10 @@ from app.config import settings
 from app.locales.texts import t
 
 
-def main_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
+def main_menu_kb(
+    lang: str = "ru",
+    is_admin: bool = False,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text=t("btn_upcoming_game", lang), callback_data="next_game"),
@@ -39,9 +42,16 @@ def main_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
         InlineKeyboardButton(text=t("btn_rules", lang), callback_data="reglament"),
         InlineKeyboardButton(text="📖 Инструкция", callback_data="instructions"),
     )
+    # Мои лиги — всегда видна зарегистрированным игрокам
     builder.row(
+        InlineKeyboardButton(text="🏆 Мои лиги", callback_data="my_leagues"),
         InlineKeyboardButton(text=t("btn_language", lang), callback_data="language_menu"),
     )
+    # Панель администратора — только для админов лиг
+    if is_admin:
+        builder.row(
+            InlineKeyboardButton(text="🔧 Панель администратора", callback_data="admin_back"),
+        )
     return builder.as_markup()
 
 

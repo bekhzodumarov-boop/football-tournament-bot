@@ -73,6 +73,10 @@ class MatchStage(str, PyEnum):
     THIRD_PLACE = "third_place"
     FINAL = "final"
 
+class LeagueRole(str, PyEnum):
+    ADMIN = "admin"
+    PLAYER = "player"
+
 MATCH_STAGE_LABELS = {
     MatchStage.GROUP:       "📋 Групповой этап",
     MatchStage.SEMIFINAL:   "🏆 Полуфинал",
@@ -105,6 +109,26 @@ class League(Base):
 
     players: Mapped[list["Player"]] = relationship(back_populates="league")
     game_days: Mapped[list["GameDay"]] = relationship(back_populates="league")
+    memberships: Mapped[list["PlayerLeague"]] = relationship(back_populates="league")
+
+
+class PlayerLeague(Base):
+    """Связь игрок ↔ лига с ролью (many-to-many)."""
+    __tablename__ = "player_leagues"
+    __table_args__ = (
+        UniqueConstraint("player_id", "league_id", name="uq_player_league"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
+    league_id: Mapped[int] = mapped_column(ForeignKey("leagues.id"), index=True)
+    role: Mapped[LeagueRole] = mapped_column(
+        Enum(LeagueRole, name="league_role_type"), default=LeagueRole.PLAYER
+    )
+    joined_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    player: Mapped["Player"] = relationship(back_populates="league_memberships")
+    league: Mapped["League"] = relationship(back_populates="memberships")
 
 
 class Player(Base):
@@ -132,6 +156,7 @@ class Player(Base):
 
     # Relationships
     league: Mapped[Optional["League"]] = relationship(back_populates="players")
+    league_memberships: Mapped[list["PlayerLeague"]] = relationship(back_populates="player")
     attendances: Mapped[list["Attendance"]] = relationship(back_populates="player")
     goals: Mapped[list["Goal"]] = relationship(back_populates="player")
     payments: Mapped[list["Payment"]] = relationship(back_populates="player")

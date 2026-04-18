@@ -7,7 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import Player, Position, League, POSITION_LABELS
+from app.database.models import Player, Position, League, POSITION_LABELS, PlayerLeague, LeagueRole
 from app.keyboards.registration import position_kb, self_rating_kb
 from app.keyboards.main_menu import main_menu_kb, language_kb
 from app.locales.texts import t
@@ -238,6 +238,16 @@ async def _finish_registration(message: Message, state: FSMContext,
         league_id=league_id,
     )
     session.add(new_player)
+    await session.flush()  # получить ID нового игрока
+
+    # Создать запись PlayerLeague если есть лига
+    if league_id:
+        session.add(PlayerLeague(
+            player_id=new_player.id,
+            league_id=league_id,
+            role=LeagueRole.PLAYER,
+        ))
+
     await session.commit()
     await state.clear()
 
@@ -586,6 +596,19 @@ async def _do_join_league(msg, state: FSMContext, session: AsyncSession,
 
     if player:
         player.league_id = league.id
+        # Создать PlayerLeague если нет
+        existing_pl = await session.execute(
+            select(PlayerLeague).where(
+                PlayerLeague.player_id == player.id,
+                PlayerLeague.league_id == league.id,
+            )
+        )
+        if existing_pl.scalar_one_or_none() is None:
+            session.add(PlayerLeague(
+                player_id=player.id,
+                league_id=league.id,
+                role=LeagueRole.PLAYER,
+            ))
         await session.commit()
 
     lang = player.language if player else "ru"

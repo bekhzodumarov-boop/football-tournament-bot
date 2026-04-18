@@ -46,6 +46,9 @@ async def create_db_and_tables():
     # Создать лигу по умолчанию и привязать существующие данные
     await _ensure_default_league()
 
+    # Заполнить player_leagues из существующих player.league_id
+    await _migrate_player_leagues()
+
     # Загрузить ID создателей лиг в рантайм-кэш
     await _load_league_admins()
 
@@ -187,6 +190,62 @@ async def _run_enum_migrations(conn) -> None:
     await conn.execute(text(
         "ALTER TYPE attendanceresponse ADD VALUE IF NOT EXISTS 'WAITLIST'"
     ))
+    # Создать тип league_role_type если его нет
+    await conn.execute(text(
+        "DO $$ BEGIN "
+        "  CREATE TYPE league_role_type AS ENUM ('admin', 'player'); "
+        "EXCEPTION WHEN duplicate_object THEN NULL; "
+        "END $$;"
+    ))
+
+
+async def _migrate_player_leagues() -> None:
+    """
+    Заполняет таблицу player_leagues из существующих player.league_id.
+    Создаёт записи для всех игроков, у которых есть league_id, но нет записи в player_leagues.
+    Роль admin — для создателей лиг, иначе player.
+    """
+    from app.database.models import PlayerLeague, Player, League, LeagueRole
+    from sqlalchemy import select, insert
+
+    async with AsyncSessionFactory() as session:
+        # Получить всех игроков с league_id
+        players_result = await session.execute(
+            select(Player).where(Player.league_id.is_not(None))
+        )
+        players = players_result.scalars().all()
+
+        # Получить все лиги (для проверки admin_telegram_id)
+        leagues_result = await session.execute(select(League))
+        leagues = {lg.id: lg for lg in leagues_result.scalars().all()}
+
+        for player in players:
+            # Проверить, нет ли уже записи
+            existing = await session.execute(
+                select(PlayerLeague).where(
+                    PlayerLeague.player_id == player.id,
+                    PlayerLeague.league_id == player.league_id,
+                )
+            )
+            if existing.scalar_one_or_none() is not None:
+                continue
+
+            league = leagues.get(player.league_id)
+            if not league:
+                continue
+
+            role = (
+                LeagueRole.ADMIN
+                if league.admin_telegram_id == player.telegram_id
+                else LeagueRole.PLAYER
+            )
+            session.add(PlayerLeague(
+                player_id=player.id,
+                league_id=player.league_id,
+                role=role,
+            ))
+
+        await session.commit()
 
 
 async def _ensure_default_league() -> None:
