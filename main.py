@@ -49,6 +49,10 @@ async def main():
     # Handlers
     register_all_handlers(dp)
 
+    # Сбросить webhook и завершить конкурирующие getUpdates сессии
+    await bot.delete_webhook(drop_pending_updates=False)
+    logger.info("Webhook cleared")
+
     # Создать таблицы в БД
     await create_db_and_tables()
     logger.info("Database ready")
