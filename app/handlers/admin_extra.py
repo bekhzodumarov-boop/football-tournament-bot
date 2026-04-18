@@ -31,6 +31,33 @@ from app.database.models import (
 from app.database.models import _gen_invite_code
 from app.locales.texts import t, goals_word as gw
 
+
+async def _league_players(
+    session,
+    league_id: int | None,
+    active_only: bool = True,
+    exclude_player_id: int | None = None,
+) -> list[Player]:
+    """Игроки лиги через PlayerLeague (не player.league_id)."""
+    if league_id is None:
+        query = select(Player)
+        if active_only:
+            query = query.where(Player.status == PlayerStatus.ACTIVE)
+        result = await session.execute(query)
+        return result.scalars().all()
+
+    query = (
+        select(Player)
+        .join(PlayerLeague, PlayerLeague.player_id == Player.id)
+        .where(PlayerLeague.league_id == league_id)
+    )
+    if active_only:
+        query = query.where(Player.status == PlayerStatus.ACTIVE)
+    if exclude_player_id is not None:
+        query = query.where(Player.id != exclude_player_id)
+    result = await session.execute(query)
+    return result.scalars().all()
+
 router = Router()
 
 
@@ -602,13 +629,7 @@ async def adm_league_info(call: CallbackQuery, session: AsyncSession):
         await call.message.edit_text("❌ Лига не найдена.", reply_markup=admin_menu_kb())
         return
 
-    players_res = await session.execute(
-        select(Player).where(
-            Player.league_id == league.id,
-            Player.status == "active"
-        )
-    )
-    players = players_res.scalars().all()
+    players = await _league_players(session, league.id, active_only=True)
 
     # Получить username бота из settings если есть, иначе дефолт
     bot_username = getattr(cfg, "BOT_USERNAME", "football_manager_uz_bot")
@@ -962,12 +983,14 @@ async def adm_rating_round_start(call: CallbackQuery, session: AsyncSession, bot
         )
         voted_count = voted_res.scalar() or 0
 
-        # Сколько было приглашено
-        total_query = select(sqlfunc.count(Player.id)).where(Player.status == PlayerStatus.ACTIVE)
+        # Сколько было приглашено (через PlayerLeague)
         if league_id:
-            total_query = total_query.where(Player.league_id == league_id)
-        total_res = await session.execute(total_query)
-        total_count = (total_res.scalar() or 1) - 1  # минус сам голосующий
+            total_count = len(await _league_players(session, league_id, active_only=True)) - 1
+        else:
+            total_res = await session.execute(
+                select(sqlfunc.count(Player.id)).where(Player.status == PlayerStatus.ACTIVE)
+            )
+            total_count = (total_res.scalar() or 1) - 1
 
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(
@@ -994,11 +1017,7 @@ async def adm_rating_round_start(call: CallbackQuery, session: AsyncSession, bot
     await session.flush()
 
     # Разослать всем активным игрокам лиги
-    query = select(Player).where(Player.status == PlayerStatus.ACTIVE)
-    if league_id:
-        query = query.where(Player.league_id == league_id)
-    players_res = await session.execute(query)
-    players = players_res.scalars().all()
+    players = await _league_players(session, league_id, active_only=True)
 
     await session.commit()
 
@@ -1074,14 +1093,10 @@ async def rv_start_voting(call: CallbackQuery, state: FSMContext, session: Async
         ]
         nominees.sort(key=lambda p: p.name)
     else:
-        nominees_query = select(Player).where(
-            Player.status == PlayerStatus.ACTIVE,
-            Player.id != voter.id,
+        nominees_query_result = await _league_players(
+            session, voter.league_id, active_only=True, exclude_player_id=voter.id
         )
-        if voter.league_id:
-            nominees_query = nominees_query.where(Player.league_id == voter.league_id)
-        nominees_res = await session.execute(nominees_query.order_by(Player.name))
-        nominees = nominees_res.scalars().all()
+        nominees = sorted(nominees_query_result, key=lambda p: p.name)
 
     if not nominees:
         await call.message.edit_text("Нет других игроков для оценки.")
@@ -3240,12 +3255,8 @@ async def admin_poll_start(call: CallbackQuery, state: FSMContext, session: Asyn
         await call.message.edit_text("❌ Лига не найдена.")
         return
 
-    # Считаем активных игроков
-    result = await session.execute(
-        select(Player)
-        .where(Player.league_id == league.id, Player.status == PlayerStatus.ACTIVE)
-    )
-    players = result.scalars().all()
+    # Считаем активных игроков через PlayerLeague
+    players = await _league_players(session, league.id, active_only=True)
     if not players:
         await call.message.edit_text(
             "⚠️ В лиге нет активных игроков.",
@@ -3329,13 +3340,7 @@ async def poll_got_options(message: Message, state: FSMContext, session: AsyncSe
     else:
         league_id = data.get("league_id")
         if league_id:
-            result = await session.execute(
-                select(Player).where(
-                    Player.league_id == league_id,
-                    Player.status == PlayerStatus.ACTIVE,
-                )
-            )
-            recipients = result.scalars().all()
+            recipients = await _league_players(session, league_id, active_only=True)
 
     if not recipients:
         await message.answer("⚠️ Список получателей пуст. Опрос не отправлен.")

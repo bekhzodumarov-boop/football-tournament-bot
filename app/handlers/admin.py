@@ -14,12 +14,45 @@ from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
     Player, Payment, Team, TeamPlayer, Match, Goal, Card,
-    League, RatingVote, RatingRound,
+    League, RatingVote, RatingRound, PlayerLeague,
 )
 from app.keyboards.game_day import game_day_action_kb, join_game_kb, delete_confirm_kb
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+async def _get_admin_league_id(session: AsyncSession, user_id: int) -> int | None:
+    """Возвращает league_id активной лиги администратора."""
+    p_res = await session.execute(
+        select(Player.league_id).where(Player.telegram_id == user_id)
+    )
+    row = p_res.one_or_none()
+    return row[0] if row else None
+
+
+async def _get_league_players(
+    session: AsyncSession,
+    league_id: int | None,
+    active_only: bool = True,
+) -> list[Player]:
+    """Возвращает игроков лиги (через PlayerLeague), опционально только активных."""
+    from app.database.models import PlayerStatus
+    query = (
+        select(Player)
+        .join(PlayerLeague, PlayerLeague.player_id == Player.id)
+        .where(PlayerLeague.league_id == league_id)
+        .order_by(Player.name)
+    )
+    if active_only:
+        query = query.where(Player.status == PlayerStatus.ACTIVE)
+    if league_id is None:
+        # fallback — все игроки
+        query = select(Player).order_by(Player.name)
+        if active_only:
+            query = query.where(Player.status == PlayerStatus.ACTIVE)
+    result = await session.execute(query)
+    return result.scalars().all()
 
 
 class BroadcastFSM(StatesGroup):
@@ -287,10 +320,9 @@ async def gd_announce(call: CallbackQuery, session: AsyncSession):
     if not game_day:
         return
 
-    players_result = await session.execute(
-        select(Player).where(Player.status == "active")
-    )
-    player_count = len(players_result.scalars().all())
+    league_id = game_day.league_id
+    players = await _get_league_players(session, league_id, active_only=True)
+    player_count = len(players)
 
     confirm_kb = InlineKeyboardBuilder()
     confirm_kb.row(
@@ -307,7 +339,7 @@ async def gd_announce(call: CallbackQuery, session: AsyncSession):
         f"📢 <b>Разослать анонс?</b>\n\n"
         f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
         f"📍 {game_day.location}\n\n"
-        f"Сообщение получат <b>{player_count}</b> активных игроков.",
+        f"Сообщение получат <b>{player_count}</b> активных игроков лиги.",
         reply_markup=confirm_kb.as_markup()
     )
 
@@ -325,10 +357,7 @@ async def gd_announce_execute(call: CallbackQuery, session: AsyncSession, bot: B
     if not game_day:
         return
 
-    players_result = await session.execute(
-        select(Player).where(Player.status == "active")
-    )
-    players = players_result.scalars().all()
+    players = await _get_league_players(session, game_day.league_id, active_only=True)
 
     text = (
         f"⚽ <b>Анонс игры!</b>\n\n"
@@ -646,8 +675,8 @@ async def adm_players_list(call: CallbackQuery, session: AsyncSession):
         return
     await call.answer()
 
-    result = await session.execute(select(Player).order_by(Player.name))
-    players = result.scalars().all()
+    league_id = await _get_admin_league_id(session, call.from_user.id)
+    players = await _get_league_players(session, league_id, active_only=False)
 
     if not players:
         await call.message.edit_text("👥 Игроков пока нет.")
@@ -657,7 +686,7 @@ async def adm_players_list(call: CallbackQuery, session: AsyncSession):
     ref_names = ", ".join(p.name for p in referees) if referees else "нет"
 
     await call.message.edit_text(
-        f"👥 <b>Игроки</b> ({len(players)} чел.)\n\n"
+        f"👥 <b>Игроки лиги</b> ({len(players)} чел.)\n\n"
         f"🦺 Судьи: <b>{ref_names}</b>\n\n"
         "Нажми на игрока чтобы изменить роль:",
         reply_markup=_players_list_kb(players)
@@ -852,7 +881,7 @@ async def adm_back_to_menu(call: CallbackQuery):
 # ══════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "admin_broadcast")
-async def adm_broadcast_start(call: CallbackQuery, state: FSMContext):
+async def adm_broadcast_start(call: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
         return
@@ -862,9 +891,13 @@ async def adm_broadcast_start(call: CallbackQuery, state: FSMContext):
     cancel_kb = InlineKeyboardBuilder()
     cancel_kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back"))
 
+    league_id = await _get_admin_league_id(session, call.from_user.id)
+    players = await _get_league_players(session, league_id, active_only=True)
+    await state.update_data(broadcast_league_id=league_id)
+
     await state.set_state(BroadcastFSM.waiting_text)
     await call.message.edit_text(
-        "📢 <b>Рассылка всем игрокам</b>\n\n"
+        f"📢 <b>Рассылка игрокам лиги</b> ({len(players)} чел.)\n\n"
         "Напиши текст сообщения. Поддерживается HTML-форматирование:\n"
         "<code>&lt;b&gt;жирный&lt;/b&gt;</code>, <code>&lt;i&gt;курсив&lt;/i&gt;</code>, "
         "<code>&lt;a href='...'&gt;ссылка&lt;/a&gt;</code>\n\n"
@@ -883,10 +916,11 @@ async def adm_broadcast_send(message: Message, state: FSMContext, session: Async
         await message.answer("❌ Пустое сообщение. Попробуй снова или нажми Отмена.")
         return
 
+    data = await state.get_data()
+    broadcast_league_id = data.get("broadcast_league_id")
     await state.clear()
 
-    result = await session.execute(select(Player))
-    players = result.scalars().all()
+    players = await _get_league_players(session, broadcast_league_id, active_only=True)
 
     sent = 0
     failed = 0
@@ -922,13 +956,18 @@ async def adm_payments_overview(call: CallbackQuery, session: AsyncSession):
     from app.keyboards.main_menu import admin_menu_kb
     from datetime import datetime
 
-    # Берём игровые дни, которые не удалены (не CANCELLED) и не в далёком прошлом
-    result = await session.execute(
+    league_id = await _get_admin_league_id(session, call.from_user.id)
+
+    query = (
         select(GameDay)
         .where(GameDay.status != GameDayStatus.CANCELLED)
         .order_by(GameDay.scheduled_at.desc())
         .limit(10)
     )
+    if league_id is not None:
+        query = query.where(GameDay.league_id == league_id)
+
+    result = await session.execute(query)
     game_days = result.scalars().all()
 
     if not game_days:

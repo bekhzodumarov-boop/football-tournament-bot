@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import (
     League, Player, PlayerStatus, GameDay, GameDayStatus,
-    Match, MatchStatus, UserActivity,
+    Match, MatchStatus, UserActivity, PlayerLeague,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,12 +113,12 @@ async def cmd_dev(message: Message, session: AsyncSession):
         .where(Match.status == MatchStatus.FINISHED)
     )).scalar() or 0
 
-    # ── Топ лиги по игрокам ──────────────────────────
+    # ── Топ лиги по игрокам (через PlayerLeague — точный подсчёт) ──────────────────────────
     top_leagues_res = await session.execute(
-        select(League.name, func.count(Player.id).label("cnt"))
-        .join(Player, Player.league_id == League.id, isouter=True)
+        select(League.name, func.count(PlayerLeague.player_id).label("cnt"))
+        .join(PlayerLeague, PlayerLeague.league_id == League.id, isouter=True)
         .group_by(League.id, League.name)
-        .order_by(func.count(Player.id).desc())
+        .order_by(func.count(PlayerLeague.player_id).desc())
         .limit(5)
     )
     top_leagues = top_leagues_res.all()

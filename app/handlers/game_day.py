@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
-    Player, MatchFormat
+    Player, MatchFormat, PlayerLeague, PlayerStatus,
 )
 from app.keyboards.game_day import join_game_kb, join_confirm_kb, game_day_action_kb
 from app.data.reglament import REGLAMENT_AGREEMENT, REGLAMENT_AGREEMENT_EN
@@ -462,12 +462,20 @@ async def _next_tournament_number(session: AsyncSession, league_id) -> int:
 
 async def _auto_announce(session: AsyncSession, bot: Bot,
                          game_day: GameDay, league_id) -> None:
-    """Авторассылка анонса всем активным игрокам лиги."""
-    query = select(Player).where(Player.status == "active")
+    """Авторассылка анонса всем активным игрокам лиги через PlayerLeague."""
     if league_id is not None:
-        query = query.where(Player.league_id == league_id)
-
-    result = await session.execute(query)
+        result = await session.execute(
+            select(Player)
+            .join(PlayerLeague, PlayerLeague.player_id == Player.id)
+            .where(
+                PlayerLeague.league_id == league_id,
+                Player.status == PlayerStatus.ACTIVE,
+            )
+        )
+    else:
+        result = await session.execute(
+            select(Player).where(Player.status == PlayerStatus.ACTIVE)
+        )
     players = result.scalars().all()
 
     text = (
