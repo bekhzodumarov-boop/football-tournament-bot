@@ -37,10 +37,26 @@ def main_menu_kb(lang: str = "ru") -> InlineKeyboardMarkup:
         )
     builder.row(
         InlineKeyboardButton(text=t("btn_rules", lang), callback_data="reglament"),
+        InlineKeyboardButton(text="📖 Инструкция", callback_data="instructions"),
     )
     builder.row(
         InlineKeyboardButton(text=t("btn_language", lang), callback_data="language_menu"),
     )
+    return builder.as_markup()
+
+
+def instructions_kb(is_admin: bool = False, is_referee: bool = False) -> InlineKeyboardMarkup:
+    """Меню выбора инструкции."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="👤 Для игрока", callback_data="instr_player"))
+    if is_referee:
+        builder.row(InlineKeyboardButton(text="🦺 Для рефери", callback_data="instr_referee"))
+    if is_admin:
+        builder.row(InlineKeyboardButton(text="🔧 Для администратора", callback_data="instr_admin"))
+    if not is_referee and not is_admin:
+        builder.row(InlineKeyboardButton(text="🦺 Для рефери", callback_data="instr_referee"))
+        builder.row(InlineKeyboardButton(text="🔧 Для администратора", callback_data="instr_admin"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu"))
     return builder.as_markup()
 
 

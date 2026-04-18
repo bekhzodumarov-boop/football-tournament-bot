@@ -27,6 +27,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from app.config import settings
+from app.locales.instructions import INSTRUCTION_REFEREE
 from app.database.models import (
     GameDay, GameDayStatus,
     Attendance, AttendanceResponse,
@@ -251,6 +252,7 @@ async def cmd_referee(message: Message, session: AsyncSession,
         "🦺 <b>Панель судьи</b>\n\nВыбери игровой день:",
         reply_markup=referee_gamedays_kb(game_days)
     )
+    await message.answer(INSTRUCTION_REFEREE)
 
 
 # ─────────────────────────────────────────────

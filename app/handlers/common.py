@@ -12,8 +12,9 @@ from app.database.models import (
     GameDay, GameDayStatus, Match, MatchStatus, Team, TeamPlayer, League,
     Goal, GoalType, Card, CardType,
 )
-from app.keyboards.main_menu import main_menu_kb, admin_menu_kb, language_kb
+from app.keyboards.main_menu import main_menu_kb, admin_menu_kb, language_kb, instructions_kb
 from app.locales.texts import t
+from app.locales.instructions import INSTRUCTION_PLAYER, INSTRUCTION_REFEREE, INSTRUCTION_ADMIN
 
 router = Router()
 
@@ -52,6 +53,8 @@ async def cmd_start(message: Message, player: Player | None, state: FSMContext,
 
     if player is None:
         await message.answer(t('reg_welcome', 'ru'))
+        # Автоматически показываем инструкцию новому пользователю
+        await message.answer(INSTRUCTION_PLAYER)
         return
 
     pos_label = POSITION_LABELS.get(player.position, str(player.position))
@@ -174,6 +177,7 @@ async def cmd_admin(message: Message, player: Player | None, state: FSMContext,
         "Выбери действие:",
         reply_markup=admin_menu_kb()
     )
+    await message.answer(INSTRUCTION_ADMIN)
 
 
 @router.callback_query(lambda c: c.data == "main_menu")
@@ -188,6 +192,45 @@ async def cb_main_menu(call: CallbackQuery, player: Player | None):
         f"⚽ Главное меню, <b>{player.name}</b>:",
         reply_markup=main_menu_kb(lang)
     )
+
+
+@router.callback_query(lambda c: c.data == "instructions")
+async def cb_instructions(call: CallbackQuery):
+    await call.answer()
+    await call.message.edit_text(
+        "📖 <b>Инструкции</b>\n\nВыбери раздел:",
+        reply_markup=instructions_kb(is_admin=True, is_referee=True)
+    )
+
+
+@router.callback_query(lambda c: c.data == "instr_player")
+async def cb_instr_player(call: CallbackQuery):
+    await call.answer()
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="instructions"))
+    await call.message.edit_text(INSTRUCTION_PLAYER, reply_markup=kb.as_markup())
+
+
+@router.callback_query(lambda c: c.data == "instr_referee")
+async def cb_instr_referee(call: CallbackQuery):
+    await call.answer()
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="instructions"))
+    await call.message.edit_text(INSTRUCTION_REFEREE, reply_markup=kb.as_markup())
+
+
+@router.callback_query(lambda c: c.data == "instr_admin")
+async def cb_instr_admin(call: CallbackQuery):
+    await call.answer()
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="instructions"))
+    await call.message.edit_text(INSTRUCTION_ADMIN, reply_markup=kb.as_markup())
 
 
 @router.callback_query(lambda c: c.data == "my_profile")
