@@ -606,7 +606,7 @@ async def adm_league_info(call: CallbackQuery, session: AsyncSession):
     players = players_res.scalars().all()
 
     # Получить username бота из settings если есть, иначе дефолт
-    bot_username = getattr(cfg, "BOT_USERNAME", "football_manager_2026_bot")
+    bot_username = getattr(cfg, "BOT_USERNAME", "football_manager_uz_bot")
     invite_link = f"https://t.me/{bot_username}?start=join_{league.invite_code}"
     share_url = _invite_share_url(invite_link, league.name)
 
@@ -711,7 +711,7 @@ async def _finish_create_league(msg, state: FSMContext, session: AsyncSession,
 
     await session.commit()
 
-    bot_username = getattr(settings, "BOT_USERNAME", "football_manager_2026_bot")
+    bot_username = getattr(settings, "BOT_USERNAME", "football_manager_uz_bot")
     invite_link = f"https://t.me/{bot_username}?start=join_{league.invite_code}"
     share_url = _invite_share_url(invite_link, league.name)
 

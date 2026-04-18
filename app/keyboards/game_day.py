@@ -31,7 +31,7 @@ def join_confirm_kb(game_day_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(
             text=t("btn_read_rules", lang),
-            url="https://t.me/football_manager_2026_bot?start=rules"
+            url="https://t.me/football_manager_uz_bot?start=rules"
         ),
     )
     builder.row(

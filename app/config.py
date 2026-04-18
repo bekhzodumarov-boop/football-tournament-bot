@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     WEBAPP_URL: str = ""
 
     # Telegram username бота (без @) — нужен для генерации инвайт-ссылок
-    BOT_USERNAME: str = "football_manager_2026_bot"
+    BOT_USERNAME: str = "football_manager_uz_bot"
 
     # Telegram channel ID для публикации итогов (например: @mychannel или -1001234567890)
     CHANNEL_ID: str = ""

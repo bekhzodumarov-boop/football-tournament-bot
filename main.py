@@ -82,7 +82,7 @@ async def main():
         except Exception as e:
             logger.warning(f"Не удалось уведомить Админа {admin_id}: {e}")
 
-    logger.info("Bot started: @football_manager_2026_bot")
+    logger.info("Bot started: @football_manager_uz_bot")
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
