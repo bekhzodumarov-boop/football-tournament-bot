@@ -44,6 +44,11 @@ class FinancialSummaryFSM(StatesGroup):
 class CreateLeagueFSM(StatesGroup):
     waiting_name = State()
     waiting_city = State()
+    waiting_player_limit = State()
+
+
+class LeaguePasswordFSM(StatesGroup):
+    waiting_password = State()
 
 
 class EditLeagueFSM(StatesGroup):
@@ -610,9 +615,12 @@ async def adm_league_info(call: CallbackQuery, session: AsyncSession):
     invite_link = f"https://t.me/{bot_username}?start=join_{league.invite_code}"
     share_url = _invite_share_url(invite_link, league.name)
 
+    password_label = "🔑 Пароль: установлен 🔒" if league.password else "🔑 Установить пароль лиги"
+
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url))
     builder.row(InlineKeyboardButton(text="✏️ Редактировать лигу", callback_data=f"edit_league:{league.id}"))
+    builder.row(InlineKeyboardButton(text=password_label, callback_data=f"league_password:{league.id}"))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back"))
 
     await call.message.edit_text(
@@ -620,7 +628,8 @@ async def adm_league_info(call: CallbackQuery, session: AsyncSession):
         f"🏆 <b>{league.name}</b>\n"
         f"📍 {league.city or '—'}\n"
         f"🔑 Инвайт-код: <code>{league.invite_code}</code>\n"
-        f"👥 Активных игроков: {len(players)}\n\n"
+        f"👥 Активных игроков: {len(players)}\n"
+        f"🔒 Пароль: {'установлен' if league.password else 'не установлен (открытая лига)'}\n\n"
         f"🔗 Ссылка для приглашения:\n<code>{invite_link}</code>\n\n"
         "Нажми «Поделиться» — откроется выбор контактов и групп Telegram.",
         reply_markup=builder.as_markup()
@@ -666,20 +675,52 @@ async def create_league_name(message: Message, state: FSMContext):
 
 
 @router.callback_query(F.data == "league_skip_city")
-async def create_league_skip_city(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+async def create_league_skip_city(call: CallbackQuery, state: FSMContext):
     await call.answer()
-    await _finish_create_league(call.message, state, session, call.from_user.id, city=None)
+    await state.update_data(city=None)
+    await _ask_player_limit(call.message, state)
 
 
 @router.message(StateFilter(CreateLeagueFSM.waiting_city))
-async def create_league_city(message: Message, state: FSMContext, session: AsyncSession):
+async def create_league_city(message: Message, state: FSMContext):
     city = message.text.strip() or None
-    await _finish_create_league(message, state, session, message.from_user.id, city=city)
+    await state.update_data(city=city)
+    await _ask_player_limit(message, state)
+
+
+async def _ask_player_limit(msg, state: FSMContext):
+    await state.set_state(CreateLeagueFSM.waiting_player_limit)
+    skip_kb = InlineKeyboardBuilder()
+    skip_kb.row(InlineKeyboardButton(text="⏭ Пропустить (20 игроков)", callback_data="league_skip_limit"))
+    await msg.answer(
+        "👥 Сколько игроков в одном турнире? <i>(например: 16, 20, 24)</i>",
+        reply_markup=skip_kb.as_markup()
+    )
+
+
+@router.callback_query(F.data == "league_skip_limit")
+async def create_league_skip_limit(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    await call.answer()
+    await _finish_create_league(call.message, state, session, call.from_user.id, player_limit=20)
+
+
+@router.message(StateFilter(CreateLeagueFSM.waiting_player_limit))
+async def create_league_player_limit(message: Message, state: FSMContext, session: AsyncSession):
+    try:
+        limit = int(message.text.strip())
+        if limit < 4 or limit > 100:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи число от 4 до 100:")
+        return
+    await _finish_create_league(message, state, session, message.from_user.id, player_limit=limit)
 
 
 async def _finish_create_league(msg, state: FSMContext, session: AsyncSession,
-                                 admin_tg_id: int, city):
+                                 admin_tg_id: int, player_limit: int = 20):
+    from app.config import register_league_admin
     data = await state.get_data()
+    city = data.get("city")
     await state.clear()
 
     # Сгенерировать уникальный код
@@ -697,6 +738,7 @@ async def _finish_create_league(msg, state: FSMContext, session: AsyncSession,
         invite_code=code,
         admin_telegram_id=admin_tg_id,
         city=city,
+        default_player_limit=player_limit,
     )
     session.add(league)
     await session.flush()
@@ -711,17 +753,22 @@ async def _finish_create_league(msg, state: FSMContext, session: AsyncSession,
 
     await session.commit()
 
+    # Зарегистрировать создателя как лига-админ в рантайм-кэше
+    register_league_admin(admin_tg_id)
+
     bot_username = getattr(settings, "BOT_USERNAME", "football_manager_uz_bot")
     invite_link = f"https://t.me/{bot_username}?start=join_{league.invite_code}"
     share_url = _invite_share_url(invite_link, league.name)
 
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url))
-    builder.row(InlineKeyboardButton(text="🔙 Меню", callback_data="admin_back"))
+    builder.row(InlineKeyboardButton(text="🔧 Панель администратора", callback_data="admin_back"))
 
     await msg.answer(
         f"✅ <b>Лига создана!</b>\n\n"
         f"🏆 {league.name}\n"
+        f"📍 {city or '—'}\n"
+        f"👥 Лимит игроков: {player_limit}\n"
         f"🔑 Инвайт-код: <code>{league.invite_code}</code>\n\n"
         f"🔗 Ссылка для приглашения:\n<code>{invite_link}</code>\n\n"
         "Нажми «Поделиться» — откроется выбор контактов и групп в Telegram.",
@@ -3307,3 +3354,129 @@ async def poll_got_options(message: Message, state: FSMContext, session: AsyncSe
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="🔙 Меню", callback_data="admin_back"))
     await message.answer(summary, reply_markup=builder.as_markup())
+
+
+# ══════════════════════════════════════════════════════
+#  ПАРОЛЬ ЛИГИ
+# ══════════════════════════════════════════════════════
+
+def _league_password_kb(league_id: int, has_password: bool) -> object:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="✏️ Изменить пароль" if has_password else "🔐 Установить пароль",
+        callback_data=f"league_password_set:{league_id}"
+    ))
+    if has_password:
+        builder.row(InlineKeyboardButton(
+            text="🗑 Удалить пароль (открытая лига)",
+            callback_data=f"league_password_delete:{league_id}"
+        ))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_league_info"))
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("league_password:"))
+async def league_password_view(call: CallbackQuery, session: AsyncSession):
+    """Просмотр/управление паролем лиги."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    league_id = int(call.data.split(":")[1])
+    league = await session.get(League, league_id)
+    if not league:
+        await call.message.edit_text("❌ Лига не найдена.")
+        return
+
+    if league.password:
+        status = f"🔒 Пароль установлен: <code>{league.password}</code>"
+    else:
+        status = "🔓 Пароль не установлен — лига открытая (любой может вступить)"
+
+    await call.message.edit_text(
+        f"🔑 <b>Пароль лиги «{league.name}»</b>\n\n{status}",
+        reply_markup=_league_password_kb(league_id, bool(league.password))
+    )
+
+
+@router.callback_query(F.data.startswith("league_password_set:"))
+async def league_password_set_start(call: CallbackQuery, state: FSMContext):
+    """Начать ввод нового пароля."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    league_id = int(call.data.split(":")[1])
+    await state.set_state(LeaguePasswordFSM.waiting_password)
+    await state.update_data(league_id=league_id)
+
+    cancel_kb = InlineKeyboardBuilder()
+    cancel_kb.row(InlineKeyboardButton(
+        text="❌ Отмена", callback_data=f"league_password:{league_id}"
+    ))
+    await call.message.edit_text(
+        "🔐 Введи новый пароль для лиги:\n\n"
+        "<i>Игроки будут вводить его при вступлении.\n"
+        "Используй простые слова — игроки вводят вручную.</i>",
+        reply_markup=cancel_kb.as_markup()
+    )
+
+
+@router.message(StateFilter(LeaguePasswordFSM.waiting_password))
+async def league_password_save(message: Message, state: FSMContext, session: AsyncSession):
+    """Сохранить пароль лиги."""
+    password = message.text.strip()
+    if len(password) < 2:
+        await message.answer("❌ Пароль слишком короткий. Минимум 2 символа:")
+        return
+    if len(password) > 50:
+        await message.answer("❌ Пароль слишком длинный. Максимум 50 символов:")
+        return
+
+    data = await state.get_data()
+    league_id = data["league_id"]
+    await state.clear()
+
+    league = await session.get(League, league_id)
+    if not league:
+        await message.answer("❌ Лига не найдена.")
+        return
+
+    league.password = password
+    await session.commit()
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="🔑 Управление паролем", callback_data=f"league_password:{league_id}"
+    ))
+    builder.row(InlineKeyboardButton(text="🔙 Моя лига", callback_data="admin_league_info"))
+    await message.answer(
+        f"✅ Пароль установлен: <code>{password}</code>\n\n"
+        "Теперь игроки должны ввести этот пароль при вступлении в лигу.",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("league_password_delete:"))
+async def league_password_delete(call: CallbackQuery, session: AsyncSession):
+    """Удалить пароль лиги."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    league_id = int(call.data.split(":")[1])
+    league = await session.get(League, league_id)
+    if not league:
+        await call.message.edit_text("❌ Лига не найдена.")
+        return
+
+    league.password = None
+    await session.commit()
+
+    await call.message.edit_text(
+        "✅ Пароль удалён. Лига открытая — любой может вступить.",
+        reply_markup=_league_password_kb(league_id, False)
+    )

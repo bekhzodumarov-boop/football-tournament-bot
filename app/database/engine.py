@@ -46,6 +46,9 @@ async def create_db_and_tables():
     # Создать лигу по умолчанию и привязать существующие данные
     await _ensure_default_league()
 
+    # Загрузить ID создателей лиг в рантайм-кэш
+    await _load_league_admins()
+
 
 async def _run_migrations(conn):
     """ALTER TABLE миграции — добавляем колонки если их нет."""
@@ -168,6 +171,12 @@ async def _run_migrations(conn):
         await conn.execute(text(
             "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS card_number VARCHAR(50)"
         ))
+        await conn.execute(text(
+            "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS password VARCHAR(100)"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS default_player_limit INTEGER DEFAULT 20"
+        ))
         # user_activity создаётся через Base.metadata.create_all — дополнительных миграций не требуется
 
 
@@ -231,6 +240,20 @@ async def _ensure_default_league() -> None:
                 .values(league_id=existing.id)
             )
             await session.commit()
+
+
+async def _load_league_admins() -> None:
+    """Загрузить ID создателей всех активных лиг в рантайм-кэш."""
+    from app.config import load_league_admins
+    from app.database.models import League
+    from sqlalchemy import select
+
+    async with AsyncSessionFactory() as session:
+        result = await session.execute(
+            select(League.admin_telegram_id).where(League.is_active == True)
+        )
+        ids = [row[0] for row in result.fetchall() if row[0]]
+        load_league_admins(ids)
 
 
 async def get_session() -> AsyncSession:

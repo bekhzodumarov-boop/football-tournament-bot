@@ -98,6 +98,8 @@ class League(Base):
     admin_telegram_id: Mapped[int] = mapped_column(BigInteger)
     city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     card_number: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    password: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    default_player_limit: Mapped[int] = mapped_column(Integer, default=20, server_default="20")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

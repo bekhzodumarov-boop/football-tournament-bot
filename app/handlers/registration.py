@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
@@ -22,6 +22,11 @@ class RegistrationFSM(StatesGroup):
     waiting_gender = State()
     waiting_phone = State()
     waiting_photo = State()
+
+
+class JoinLeagueFSM(StatesGroup):
+    choosing_league = State()
+    waiting_password = State()
 
 
 class EditProfileFSM(StatesGroup):
@@ -251,15 +256,33 @@ async def _finish_registration(message: Message, state: FSMContext,
     )
 
     if photo_file_id:
-        await message.answer_photo(photo=photo_file_id, caption=text, reply_markup=main_menu_kb())
+        await message.answer_photo(photo=photo_file_id, caption=text)
     else:
-        await message.answer(text, reply_markup=main_menu_kb())
+        await message.answer(text)
 
-    # Language selection step — ask after registration
-    await message.answer(
-        t('choose_language', 'ru'),
-        reply_markup=language_kb('ru')
-    )
+    if pending_invite_code:
+        # Пришёл по инвайт-ссылке — сразу в главное меню + выбор языка
+        await message.answer(
+            "✅ Ты вступил в лигу!\nИспользуй меню ниже:",
+            reply_markup=main_menu_kb()
+        )
+        await message.answer(t('choose_language', 'ru'), reply_markup=language_kb('ru'))
+    else:
+        # Новый пользователь без лиги — предложить выбор
+        post_reg_kb = InlineKeyboardBuilder()
+        post_reg_kb.row(InlineKeyboardButton(
+            text="🏆 Войти в существующую лигу",
+            callback_data="join_league_list"
+        ))
+        post_reg_kb.row(InlineKeyboardButton(
+            text="➕ Создать свою лигу",
+            callback_data="cmd_create_league"
+        ))
+        await message.answer(
+            "🎉 Регистрация завершена!\n\n"
+            "Теперь выбери что хочешь сделать:",
+            reply_markup=post_reg_kb.as_markup()
+        )
 
 
 # ══════════════════════════════════════════════════════
@@ -459,6 +482,119 @@ async def ep_photo_remove(message: Message, state: FSMContext, session: AsyncSes
 @router.message(EditProfileFSM.waiting_photo)
 async def ep_photo_wrong(message: Message):
     await message.answer("📸 Пришли фото или напиши /skip")
+
+
+# ══════════════════════════════════════════════════════
+#  ВСТУПЛЕНИЕ В ЛИГУ (из онбординга)
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "join_league_list")
+async def join_league_list(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    """Показать список доступных лиг."""
+    await call.answer()
+
+    result = await session.execute(
+        select(League).where(League.is_active == True).order_by(League.name)
+    )
+    leagues = result.scalars().all()
+
+    if not leagues:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="➕ Создать лигу", callback_data="cmd_create_league"))
+        await call.message.edit_text(
+            "😔 Пока нет доступных лиг.\n\nСоздай свою!",
+            reply_markup=builder.as_markup()
+        )
+        return
+
+    await state.set_state(JoinLeagueFSM.choosing_league)
+
+    builder = InlineKeyboardBuilder()
+    for league in leagues[:15]:
+        city_suffix = f" ({league.city})" if league.city else ""
+        lock = " 🔒" if league.password else ""
+        builder.row(InlineKeyboardButton(
+            text=f"🏆 {league.name}{city_suffix}{lock}",
+            callback_data=f"join_league_select:{league.id}"
+        ))
+    builder.row(InlineKeyboardButton(text="➕ Создать свою лигу", callback_data="cmd_create_league"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu"))
+
+    await call.message.edit_text(
+        "🏆 <b>Выбери лигу</b>\n\n"
+        "🔒 — лига защищена паролем\n\n"
+        "Нажми на лигу чтобы вступить:",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(StateFilter(JoinLeagueFSM.choosing_league), F.data.startswith("join_league_select:"))
+async def join_league_select(call: CallbackQuery, state: FSMContext,
+                              session: AsyncSession, player: Player | None):
+    """Выбрана лига — проверяем пароль или вступаем."""
+    await call.answer()
+    league_id = int(call.data.split(":")[1])
+    league = await session.get(League, league_id)
+
+    if not league or not league.is_active:
+        await call.answer("❌ Лига не найдена", show_alert=True)
+        return
+
+    if league.password:
+        await state.set_state(JoinLeagueFSM.waiting_password)
+        await state.update_data(target_league_id=league_id)
+
+        cancel_kb = InlineKeyboardBuilder()
+        cancel_kb.row(InlineKeyboardButton(text="🔙 Назад к списку", callback_data="join_league_list"))
+        await call.message.edit_text(
+            f"🔒 Лига <b>«{league.name}»</b> защищена паролем.\n\n"
+            "Введи пароль для вступления:",
+            reply_markup=cancel_kb.as_markup()
+        )
+    else:
+        await _do_join_league(call.message, state, session, player, league)
+
+
+@router.message(StateFilter(JoinLeagueFSM.waiting_password))
+async def join_league_check_password(message: Message, state: FSMContext,
+                                      session: AsyncSession, player: Player | None):
+    """Проверить пароль и вступить или отказать."""
+    data = await state.get_data()
+    league_id = data.get("target_league_id")
+    league = await session.get(League, league_id)
+
+    if not league:
+        await state.clear()
+        await message.answer("❌ Лига не найдена.")
+        return
+
+    if message.text and message.text.strip() == league.password:
+        await _do_join_league(message, state, session, player, league)
+    else:
+        cancel_kb = InlineKeyboardBuilder()
+        cancel_kb.row(InlineKeyboardButton(text="🔙 Назад к списку", callback_data="join_league_list"))
+        await message.answer(
+            "❌ <b>Неверный пароль.</b>\n\nПопробуй ещё раз или выбери другую лигу:",
+            reply_markup=cancel_kb.as_markup()
+        )
+
+
+async def _do_join_league(msg, state: FSMContext, session: AsyncSession,
+                           player: Player | None, league: League):
+    """Вступить игрока в лигу."""
+    await state.clear()
+
+    if player:
+        player.league_id = league.id
+        await session.commit()
+
+    lang = player.language if player else "ru"
+    await msg.answer(
+        f"✅ Ты вступил в лигу <b>«{league.name}»</b>!\n\n"
+        "Добро пожаловать! 🎉",
+        reply_markup=main_menu_kb(lang)
+    )
+    await msg.answer(t('choose_language', lang), reply_markup=language_kb(lang))
 
 
 # -- Изменить обращение (пол) --

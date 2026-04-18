@@ -2,6 +2,19 @@ from pydantic_settings import BaseSettings
 from pydantic import field_validator
 from typing import List
 
+# Рантайм-кэш ID создателей лиг (грузится при старте + обновляется при создании лиги)
+_league_admin_ids: set[int] = set()
+
+
+def register_league_admin(user_id: int) -> None:
+    """Добавить создателя лиги в рантайм-кэш админов."""
+    _league_admin_ids.add(user_id)
+
+
+def load_league_admins(ids: list[int]) -> None:
+    """Загрузить всех создателей лиг из БД при старте."""
+    _league_admin_ids.update(ids)
+
 
 class Settings(BaseSettings):
     BOT_TOKEN: str
@@ -47,7 +60,7 @@ class Settings(BaseSettings):
         extra = "ignore"   # игнорировать лишние поля из .env
 
     def is_admin(self, user_id: int) -> bool:
-        return user_id in self.ADMIN_IDS
+        return user_id in self.ADMIN_IDS or user_id in _league_admin_ids
 
     def is_developer(self, user_id: int) -> bool:
         """Разработчик бота — доступ к глобальной аналитике."""
