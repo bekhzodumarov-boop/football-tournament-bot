@@ -1391,7 +1391,7 @@ async def gd_rating_close(call: CallbackQuery, session: AsyncSession):
 # ══════════════════════════════════════════════════════
 
 TEAM_COLORS = ["🔴", "🟡", "🔵", "🟢", "🟠", "🟣", "⚪", "⚫"]
-TEAM_NAMES  = ["Reds", "Golden", "Blue", "Green", "E", "F", "G", "H"]
+TEAM_NAMES  = ["Red", "Golden", "Blue", "Green", "E", "F", "G", "H"]
 
 
 @router.callback_query(F.data.startswith("gd_auto_teams:"))
