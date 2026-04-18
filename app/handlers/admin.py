@@ -389,7 +389,9 @@ async def gd_payment(call: CallbackQuery, session: AsyncSession):
     game_day = await session.get(GameDay, game_day_id)
 
     result = await session.execute(
-        select(Attendance).where(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(
             Attendance.game_day_id == game_day_id,
             Attendance.response == AttendanceResponse.YES
         )
@@ -400,15 +402,15 @@ async def gd_payment(call: CallbackQuery, session: AsyncSession):
         await call.message.edit_text("Никто не записан.", reply_markup=game_day_action_kb(game_day_id))
         return
 
+    # Загрузить все платежи за этот игровой день одним запросом
+    payments_result = await session.execute(
+        select(Payment).where(Payment.game_day_id == game_day_id)
+    )
+    payments_map = {p.player_id: p for p in payments_result.scalars().all()}
+
     builder = InlineKeyboardBuilder()
     for att in attendances:
-        payment_result = await session.execute(
-            select(Payment).where(
-                Payment.game_day_id == game_day_id,
-                Payment.player_id == att.player_id
-            )
-        )
-        payment = payment_result.scalar_one_or_none()
+        payment = payments_map.get(att.player_id)
         paid = payment and payment.paid
         emoji = "✅" if paid else "❌"
         builder.button(
