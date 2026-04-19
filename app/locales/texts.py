@@ -151,6 +151,26 @@ TEXTS = {
             "📍 {location}\n\n"
             "Подтверди участие:"
         ),
+        "remind_before": (
+            "⏰ <b>Завтра игра!</b>\n\n"
+            "📅 {date}, начало в {time}\n"
+            "📍 {location}\n"
+            "💰 Взнос: {cost} сум.\n"
+            "👥 Записалось: {registered}/{limit}\n\n"
+            "Ты в списке участников. Пожалуйста, подтверди своё участие — "
+            "это поможет организаторам правильно подготовиться.\n\n"
+            "Придёшь? 👇"
+        ),
+        "remind_today": (
+            "🔔 <b>Сегодня игра!</b>\n\n"
+            "🕐 Начало в {time}\n"
+            "📍 {location}\n"
+            "💰 Взнос: {cost} сум.\n\n"
+            "Не забудь взять:\n"
+            "• Удобную форму и бутсы\n"
+            "• Воду\n\n"
+            "Ждём тебя! Подтверди участие 👇"
+        ),
         "confirm_yes_response": "✅ Отлично! Ждём тебя на игре 💪",
         "confirm_no_response": "😔 Жаль! Твоё место передано следующему игроку.",
         "confirm_late_response": "⏰ Понял, опаздываешь. Постарайся успеть!",
@@ -409,6 +429,26 @@ TEXTS = {
             "📍 {location}\n\n"
             "Confirm your attendance:"
         ),
+        "remind_before": (
+            "⏰ <b>Game tomorrow!</b>\n\n"
+            "📅 {date}, starts at {time}\n"
+            "📍 {location}\n"
+            "💰 Fee: {cost} sum\n"
+            "👥 Registered: {registered}/{limit}\n\n"
+            "You're on the list. Please confirm your attendance — "
+            "it helps the organizer prepare.\n\n"
+            "Are you coming? 👇"
+        ),
+        "remind_today": (
+            "🔔 <b>Game today!</b>\n\n"
+            "🕐 Starts at {time}\n"
+            "📍 {location}\n"
+            "💰 Fee: {cost} sum\n\n"
+            "Don't forget to bring:\n"
+            "• Comfortable kit and boots\n"
+            "• Water\n\n"
+            "See you there! Confirm attendance 👇"
+        ),
         "confirm_yes_response": "✅ Great! See you at the game 💪",
         "confirm_no_response": "😔 Too bad! Your spot has been passed to the next player.",
         "confirm_late_response": "⏰ Got it, you'll be late. Try to make it!",
@@ -643,6 +683,26 @@ TEXTS = {
             "📅 {date}\n"
             "📍 {location}\n\n"
             "Qatnashishingizni tasdiqlang:"
+        ),
+        "remind_before": (
+            "⏰ <b>Ertaga o'yin!</b>\n\n"
+            "📅 {date}, boshlanish {time}\n"
+            "📍 {location}\n"
+            "💰 To'lov: {cost} so'm\n"
+            "👥 Yozilganlar: {registered}/{limit}\n\n"
+            "Siz ro'yxatdasiz. Iltimos, ishtirokingizni tasdiqlang — "
+            "bu tashkilotchiga tayyorgarlik ko'rishga yordam beradi.\n\n"
+            "Kelasizmi? 👇"
+        ),
+        "remind_today": (
+            "🔔 <b>Bugun o'yin!</b>\n\n"
+            "🕐 Boshlanish {time}\n"
+            "📍 {location}\n"
+            "💰 To'lov: {cost} so'm\n\n"
+            "Quyidagilarni unutmang:\n"
+            "• Qulay forma va futbol oyoq kiyimi\n"
+            "• Suv\n\n"
+            "Sizni kutamiz! Ishtirokni tasdiqlang 👇"
         ),
         "confirm_yes_response": "✅ Ajoyib! O'yinda ko'rishguncha 💪",
         "confirm_no_response": "😔 Afsuski! Sizning joyingiz keyingi o'yinchiga berildi.",
@@ -891,6 +951,26 @@ TEXTS = {
             "📅 {date}\n"
             "📍 {location}\n\n"
             "Bestätige deine Teilnahme:"
+        ),
+        "remind_before": (
+            "⏰ <b>Morgen ist Spiel!</b>\n\n"
+            "📅 {date}, Beginn um {time}\n"
+            "📍 {location}\n"
+            "💰 Beitrag: {cost} Sum\n"
+            "👥 Angemeldet: {registered}/{limit}\n\n"
+            "Du stehst auf der Liste. Bitte bestätige deine Teilnahme — "
+            "das hilft dem Organisator bei der Vorbereitung.\n\n"
+            "Kommst du? 👇"
+        ),
+        "remind_today": (
+            "🔔 <b>Heute ist Spiel!</b>\n\n"
+            "🕐 Beginn um {time}\n"
+            "📍 {location}\n"
+            "💰 Beitrag: {cost} Sum\n\n"
+            "Vergiss nicht mitzubringen:\n"
+            "• Bequeme Ausrüstung und Schuhe\n"
+            "• Wasser\n\n"
+            "Wir sehen uns! Teilnahme bestätigen 👇"
         ),
         "confirm_yes_response": "✅ Super! Bis zum Spiel 💪",
         "confirm_no_response": "😔 Schade! Dein Platz wurde an den nächsten Spieler weitergegeben.",

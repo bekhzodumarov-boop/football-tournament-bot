@@ -121,6 +121,9 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="💳 Моя банковская карта", callback_data="admin_card"),
     )
     builder.row(
+        InlineKeyboardButton(text="📋 История рассылок", callback_data="admin_broadcast_history"),
+    )
+    builder.row(
         InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"),
     )
     return builder.as_markup()

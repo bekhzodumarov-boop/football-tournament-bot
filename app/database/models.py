@@ -351,6 +351,22 @@ class Card(Base):
     team: Mapped["Team"] = relationship()
 
 
+class BroadcastLog(Base):
+    """Лог всех рассылок: анонсы, напоминания, broadcast, итоги."""
+    __tablename__ = "broadcast_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    league_id: Mapped[Optional[int]] = mapped_column(ForeignKey("leagues.id"), nullable=True, index=True)
+    game_day_id: Mapped[Optional[int]] = mapped_column(ForeignKey("game_days.id"), nullable=True)
+    message_type: Mapped[str] = mapped_column(String(50))
+    # announce / remind_before / remind_today / broadcast / results / remind_manual_before / remind_manual_today
+    message_preview: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    recipients_count: Mapped[int] = mapped_column(Integer, default=0)
+    sent_count: Mapped[int] = mapped_column(Integer, default=0)
+    sent_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    sent_by_telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+
 class UserActivity(Base):
     """Трекинг ежедневной активности пользователей (DAU/WAU/MAU)."""
     __tablename__ = "user_activity"

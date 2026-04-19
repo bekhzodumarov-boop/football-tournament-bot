@@ -460,6 +460,71 @@ async def _next_tournament_number(session: AsyncSession, league_id) -> int:
     return n
 
 
+# ---------- Подтверждение участия (кнопки из напоминаний) ----------
+
+@router.callback_query(F.data.startswith("confirm_yes:"))
+async def confirm_attendance_yes(call: CallbackQuery, session: AsyncSession, player: Player | None):
+    await call.answer()
+    if not player:
+        return
+
+    game_day_id = int(call.data.split(":")[1])
+    result = await session.execute(
+        select(Attendance).where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.player_id == player.id,
+        )
+    )
+    att = result.scalar_one_or_none()
+
+    if att and att.response == AttendanceResponse.YES:
+        att.confirmed_final = True
+        await session.commit()
+
+    lang = getattr(player, 'language', None) or 'ru'
+    await call.message.edit_text(t('confirm_yes_response', lang), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("confirm_no:"))
+async def confirm_attendance_no(call: CallbackQuery, session: AsyncSession,
+                                player: Player | None, bot: Bot):
+    await call.answer()
+    if not player:
+        return
+
+    game_day_id = int(call.data.split(":")[1])
+    result = await session.execute(
+        select(Attendance).where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.player_id == player.id,
+        )
+    )
+    att = result.scalar_one_or_none()
+
+    was_yes = att and att.response == AttendanceResponse.YES
+    if att:
+        att.response = AttendanceResponse.NO
+        att.confirmed_final = False
+        att.responded_at = datetime.now()
+        await session.commit()
+
+    lang = getattr(player, 'language', None) or 'ru'
+    await call.message.edit_text(t('confirm_no_response', lang), parse_mode="HTML")
+
+    if was_yes:
+        await _notify_first_waitlist(session, game_day_id, bot)
+
+
+@router.callback_query(F.data.startswith("late:"))
+async def confirm_attendance_late(call: CallbackQuery, player: Player | None):
+    await call.answer()
+    if not player:
+        return
+
+    lang = getattr(player, 'language', None) or 'ru'
+    await call.message.edit_text(t('confirm_late_response', lang), parse_mode="HTML")
+
+
 async def _auto_announce(session: AsyncSession, bot: Bot,
                          game_day: GameDay, league_id) -> None:
     """Авторассылка анонса всем активным игрокам лиги через PlayerLeague."""

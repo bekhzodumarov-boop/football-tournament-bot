@@ -14,7 +14,7 @@ from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
     Player, Payment, Team, TeamPlayer, Match, Goal, Card,
-    League, RatingVote, RatingRound, PlayerLeague,
+    League, RatingVote, RatingRound, PlayerLeague, BroadcastLog,
 )
 from app.keyboards.game_day import game_day_action_kb, join_game_kb, delete_confirm_kb
 
@@ -1059,3 +1059,231 @@ async def adm_export_sheets(call: CallbackQuery, session: AsyncSession):
             "Проверь правильность GOOGLE_CREDENTIALS_JSON и GOOGLE_SHEET_ID.",
             reply_markup=admin_menu_kb(),
         )
+
+
+# ══════════════════════════════════════════════════════
+#  РУЧНЫЕ НАПОМИНАНИЯ
+# ══════════════════════════════════════════════════════
+
+def _remind_confirm_kb(game_day_id: int, reminder_type: str) -> InlineKeyboardMarkup:
+    """Подтверждение ручной рассылки напоминания."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Разослать",
+            callback_data=f"gd_remind_ok:{game_day_id}:{reminder_type}",
+        ),
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data=f"gd_players:{game_day_id}",
+        ),
+    )
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("gd_remind_before:"))
+async def gd_remind_before(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        return
+
+    result = await session.execute(
+        select(Attendance).where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES,
+        )
+    )
+    count = len(result.scalars().all())
+
+    await call.message.edit_text(
+        f"📅 <b>Напоминание «за день до игры»</b>\n\n"
+        f"Игра: <b>{game_day.display_name}</b>\n"
+        f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"Получат: <b>{count}</b> записавшихся игроков.\n"
+        "Сообщение будет содержать кнопки «Подтверждаю» / «Не приду» / «Опоздаю».\n\n"
+        "Разослать прямо сейчас?",
+        reply_markup=_remind_confirm_kb(game_day_id, "before"),
+    )
+
+
+@router.callback_query(F.data.startswith("gd_remind_today:"))
+async def gd_remind_today(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        return
+
+    result = await session.execute(
+        select(Attendance).where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES,
+        )
+    )
+    count = len(result.scalars().all())
+
+    await call.message.edit_text(
+        f"⏰ <b>Напоминание «в день игры»</b>\n\n"
+        f"Игра: <b>{game_day.display_name}</b>\n"
+        f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"Получат: <b>{count}</b> записавшихся игроков.\n"
+        "Сообщение будет содержать кнопки «Подтверждаю» / «Не приду» / «Опоздаю».\n\n"
+        "Разослать прямо сейчас?",
+        reply_markup=_remind_confirm_kb(game_day_id, "today"),
+    )
+
+
+@router.callback_query(F.data.startswith("gd_remind_ok:"))
+async def gd_remind_execute(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("⏳ Рассылаю напоминания...", show_alert=False)
+
+    parts = call.data.split(":")
+    game_day_id = int(parts[1])
+    reminder_type = parts[2]  # "before" or "today"
+
+    game_day = await session.get(
+        GameDay, game_day_id,
+        options=[selectinload(GameDay.attendances)]
+    )
+    if not game_day:
+        return
+
+    result = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES,
+        )
+    )
+    attendances = result.scalars().all()
+
+    date_str = game_day.scheduled_at.strftime("%d.%m.%Y")
+    time_str = game_day.scheduled_at.strftime("%H:%M")
+    registered = sum(1 for a in game_day.attendances if a.response == AttendanceResponse.YES)
+
+    from app.locales.texts import t
+    from app.keyboards.game_day import confirm_attendance_kb
+
+    sent = 0
+    for att in attendances:
+        try:
+            lang = getattr(att.player, 'language', None) or 'ru'
+            if reminder_type == "before":
+                text = t(
+                    'remind_before', lang,
+                    date=date_str, time=time_str,
+                    location=game_day.location,
+                    cost=game_day.cost_per_player,
+                    registered=registered,
+                    limit=game_day.player_limit,
+                )
+            else:
+                text = t(
+                    'remind_today', lang,
+                    time=time_str,
+                    location=game_day.location,
+                    cost=game_day.cost_per_player,
+                )
+            await bot.send_message(
+                att.player.telegram_id,
+                text,
+                reply_markup=confirm_attendance_kb(game_day_id, lang),
+                parse_mode="HTML",
+            )
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Cannot send reminder to {att.player.telegram_id}: {e}")
+
+    # Записать в BroadcastLog
+    label = "за день до игры" if reminder_type == "before" else "в день игры"
+    session.add(BroadcastLog(
+        league_id=game_day.league_id,
+        game_day_id=game_day_id,
+        message_type=f"remind_manual_{reminder_type}",
+        message_preview=f"Ручное напоминание {label} — {game_day.display_name}",
+        recipients_count=len(attendances),
+        sent_count=sent,
+        sent_by_telegram_id=call.from_user.id,
+    ))
+    await session.commit()
+
+    await call.message.edit_text(
+        f"✅ Напоминание отправлено <b>{sent}</b> игрокам.",
+        reply_markup=game_day_action_kb(game_day_id),
+    )
+
+
+# ══════════════════════════════════════════════════════
+#  ИСТОРИЯ РАССЫЛОК
+# ══════════════════════════════════════════════════════
+
+_BROADCAST_TYPE_LABELS = {
+    "announce":             "📢 Анонс",
+    "remind_before":        "📅 Напоминание (накануне авто)",
+    "remind_today":         "⏰ Напоминание (день игры авто)",
+    "remind_manual_before": "📅 Напоминание (накануне вручную)",
+    "remind_manual_today":  "⏰ Напоминание (день игры вручную)",
+    "broadcast":            "📣 Массовая рассылка",
+    "results":              "🏆 Итоги турнира",
+}
+
+
+@router.callback_query(F.data == "admin_broadcast_history")
+async def admin_broadcast_history(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    league_id = await _get_admin_league_id(session, call.from_user.id)
+
+    result = await session.execute(
+        select(BroadcastLog)
+        .where(BroadcastLog.league_id == league_id)
+        .order_by(BroadcastLog.sent_at.desc())
+        .limit(20)
+    )
+    logs = result.scalars().all()
+
+    from app.keyboards.main_menu import admin_menu_kb
+
+    if not logs:
+        await call.message.edit_text(
+            "📋 <b>История рассылок</b>\n\nРассылок пока не было.",
+            reply_markup=admin_menu_kb(),
+        )
+        return
+
+    lines = ["📋 <b>История рассылок</b> (последние 20)\n"]
+    for log in logs:
+        type_label = _BROADCAST_TYPE_LABELS.get(log.message_type, log.message_type)
+        sent_str = log.sent_at.strftime("%d.%m %H:%M")
+        preview = log.message_preview or "—"
+        lines.append(
+            f"<b>{sent_str}</b> · {type_label}\n"
+            f"   👥 {log.sent_count}/{log.recipients_count} · {preview}\n"
+        )
+
+    back_kb = InlineKeyboardBuilder()
+    back_kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back"))
+
+    await call.message.edit_text(
+        "\n".join(lines),
+        reply_markup=back_kb.as_markup(),
+        parse_mode="HTML",
+    )
