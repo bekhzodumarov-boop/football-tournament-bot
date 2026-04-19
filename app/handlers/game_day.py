@@ -515,16 +515,6 @@ async def confirm_attendance_no(call: CallbackQuery, session: AsyncSession,
         await _notify_first_waitlist(session, game_day_id, bot)
 
 
-@router.callback_query(F.data.startswith("late:"))
-async def confirm_attendance_late(call: CallbackQuery, player: Player | None):
-    await call.answer()
-    if not player:
-        return
-
-    lang = getattr(player, 'language', None) or 'ru'
-    await call.message.edit_text(t('confirm_late_response', lang), parse_mode="HTML")
-
-
 async def _auto_announce(session: AsyncSession, bot: Bot,
                          game_day: GameDay, league_id) -> None:
     """Авторассылка анонса всем активным игрокам лиги через PlayerLeague."""

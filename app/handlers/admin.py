@@ -116,15 +116,17 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
                 return f' <a href="{link}">@{p.username}</a>'
             return f' <a href="tg://user?id={p.telegram_id}">💬</a>'
 
+        confirmed = sum(1 for a in attendances if a.confirmed_final)
         limit = game_day.player_limit if game_day else "?"
-        lines = [f"📋 <b>{gd_name}</b>\n👥 Записались ({len(attendances)}/{limit}):\n"]
+        lines = [f"📋 <b>{gd_name}</b>\n👥 Записались ({len(attendances)}/{limit}) · ✅ подтвердили: {confirmed}\n"]
         for i, att in enumerate(attendances, 1):
             p = att.player
             if not p:
                 continue
             pos = POSITION_LABELS.get(p.position, p.position or "—")
             rating = p.rating if p.rating is not None else 0.0
-            lines.append(f"{i}. <b>{p.name}</b>{_player_line(p)} — {pos}, ⭐{rating:.1f}")
+            confirm_icon = "✅" if att.confirmed_final else "⏳"
+            lines.append(f"{i}. {confirm_icon} <b>{p.name}</b>{_player_line(p)} — {pos}, ⭐{rating:.1f}")
 
         if waitlist:
             lines.append(f"\n⏳ <b>Лист ожидания ({len(waitlist)}):</b>")
