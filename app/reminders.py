@@ -104,7 +104,7 @@ async def _send_confirm_reminder(game_day_id: int, reminder_type: str) -> None:
         if not game_day or game_day.status == GameDayStatus.CANCELLED:
             return
 
-        result = await session.execute(
+        query = (
             select(Attendance)
             .options(selectinload(Attendance.player))
             .where(
@@ -112,6 +112,10 @@ async def _send_confirm_reminder(game_day_id: int, reminder_type: str) -> None:
                 Attendance.response == AttendanceResponse.YES,
             )
         )
+        # В день игры — только тем, кто НЕ подтвердил участие после напоминания накануне
+        if reminder_type == "today":
+            query = query.where(Attendance.confirmed_final == False)
+        result = await session.execute(query)
         attendances = result.scalars().all()
 
         date_str = game_day.scheduled_at.strftime("%d.%m.%Y")

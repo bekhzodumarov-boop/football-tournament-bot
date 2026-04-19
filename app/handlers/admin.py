@@ -1108,7 +1108,7 @@ async def gd_remind_before(call: CallbackQuery, session: AsyncSession):
         f"Игра: <b>{game_day.display_name}</b>\n"
         f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n\n"
         f"Получат: <b>{count}</b> записавшихся игроков.\n"
-        "Сообщение будет содержать кнопки «Подтверждаю» / «Не приду» / «Опоздаю».\n\n"
+        "Сообщение содержит кнопки «Подтверждаю» / «Не приду».\n\n"
         "Разослать прямо сейчас?",
         reply_markup=_remind_confirm_kb(game_day_id, "before"),
     )
@@ -1130,6 +1130,7 @@ async def gd_remind_today(call: CallbackQuery, session: AsyncSession):
         select(Attendance).where(
             Attendance.game_day_id == game_day_id,
             Attendance.response == AttendanceResponse.YES,
+            Attendance.confirmed_final == False,
         )
     )
     count = len(result.scalars().all())
@@ -1138,8 +1139,8 @@ async def gd_remind_today(call: CallbackQuery, session: AsyncSession):
         f"⏰ <b>Напоминание «в день игры»</b>\n\n"
         f"Игра: <b>{game_day.display_name}</b>\n"
         f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n\n"
-        f"Получат: <b>{count}</b> записавшихся игроков.\n"
-        "Сообщение будет содержать кнопки «Подтверждаю» / «Не приду» / «Опоздаю».\n\n"
+        f"Получат: <b>{count}</b> игроков, не подтвердивших участие.\n"
+        "Те, кто уже нажал «Подтверждаю», сообщение не получат.\n\n"
         "Разослать прямо сейчас?",
         reply_markup=_remind_confirm_kb(game_day_id, "today"),
     )
@@ -1163,7 +1164,7 @@ async def gd_remind_execute(call: CallbackQuery, session: AsyncSession, bot: Bot
     if not game_day:
         return
 
-    result = await session.execute(
+    att_query = (
         select(Attendance)
         .options(selectinload(Attendance.player))
         .where(
@@ -1171,6 +1172,10 @@ async def gd_remind_execute(call: CallbackQuery, session: AsyncSession, bot: Bot
             Attendance.response == AttendanceResponse.YES,
         )
     )
+    # В день игры — только тем, кто НЕ подтвердил на первое напоминание
+    if reminder_type == "today":
+        att_query = att_query.where(Attendance.confirmed_final == False)
+    result = await session.execute(att_query)
     attendances = result.scalars().all()
 
     date_str = game_day.scheduled_at.strftime("%d.%m.%Y")
