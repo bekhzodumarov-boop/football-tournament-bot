@@ -1067,6 +1067,115 @@ async def adm_rating_round_start(call: CallbackQuery, session: AsyncSession, bot
     )
 
 
+@router.callback_query(F.data.startswith("gd_rating:"))
+async def gd_rating_start(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    """Запустить рейтинг-голосование среди участников конкретного игрового дня."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    from app.keyboards.game_day import game_day_action_kb
+    from datetime import datetime
+
+    game_day_id = int(call.data.split(":")[1])
+
+    # Проверить — нет ли уже активного раунда
+    active_res = await session.execute(
+        select(RatingRound).where(RatingRound.status == "active")
+    )
+    existing = active_res.scalar_one_or_none()
+    if existing:
+        from sqlalchemy import func as sqlfunc
+        voted_res = await session.execute(
+            select(sqlfunc.count(sqlfunc.distinct(RatingVote.voter_id)))
+            .where(RatingVote.round_id == existing.id)
+        )
+        voted_count = voted_res.scalar() or 0
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(
+            text="🔒 Закрыть раунд и применить",
+            callback_data=f"rating_round_close:{existing.id}"
+        ))
+        builder.row(InlineKeyboardButton(
+            text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"
+        ))
+        await call.message.edit_text(
+            f"⚠️ <b>Уже есть активный раунд голосования</b>\n\n"
+            f"Начат: {existing.started_at.strftime('%d.%m.%Y %H:%M')}\n"
+            f"📊 Проголосовали: <b>{voted_count}</b> игроков\n\n"
+            "Сначала закрой текущий раунд, потом запускай новый.",
+            reply_markup=builder.as_markup()
+        )
+        return
+
+    # Получить YES-участников этого игрового дня
+    att_res = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES,
+        )
+    )
+    attendances = att_res.scalars().all()
+    players = [a.player for a in attendances if a.player]
+
+    if not players:
+        await call.answer("❌ Нет записавшихся игроков", show_alert=True)
+        return
+
+    # Создать раунд привязанный к игровому дню
+    round_ = RatingRound(
+        triggered_by=f"admin:{call.from_user.id}",
+        status="active",
+        game_day_id=game_day_id,
+    )
+    session.add(round_)
+    await session.flush()
+    await session.commit()
+
+    vote_kb = InlineKeyboardBuilder()
+    vote_kb.row(InlineKeyboardButton(
+        text="⭐ Оценить игроков",
+        callback_data=f"rv_start:{round_.id}"
+    ))
+
+    sent = 0
+    for p in players:
+        try:
+            lang = getattr(p, 'language', None) or 'ru'
+            await bot.send_message(
+                p.telegram_id,
+                t('rating_invite', lang),
+                reply_markup=vote_kb.as_markup()
+            )
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Cannot send rating invite to {p.telegram_id}: {e}")
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="🔒 Закрыть раунд и применить",
+        callback_data=f"rating_round_close:{round_.id}"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"
+    ))
+
+    game_day = await session.get(GameDay, game_day_id)
+    gd_name = game_day.display_name if game_day else f"#{game_day_id}"
+
+    await call.message.edit_text(
+        f"⭐ <b>Рейтинг-голосование запущено!</b>\n\n"
+        f"🏆 {gd_name} · {sent} игроков\n\n"
+        "Каждый участник получил приглашение оценить других.\n"
+        "Когда все проголосуют — нажми «Закрыть» для применения результатов.",
+        reply_markup=builder.as_markup()
+    )
+
+
 @router.callback_query(F.data.startswith("rv_start:"))
 async def rv_start_voting(call: CallbackQuery, state: FSMContext, session: AsyncSession):
     """Игрок начинает голосование."""

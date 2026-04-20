@@ -74,6 +74,9 @@ def game_day_action_kb(game_day_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✏️ Переименовать команды", callback_data=f"gd_rename_teams:{game_day_id}"),
     )
     builder.row(
+        InlineKeyboardButton(text="⭐ Рейтинг-голосование", callback_data=f"gd_rating:{game_day_id}"),
+    )
+    builder.row(
         InlineKeyboardButton(text="📢 Запустить опрос", callback_data=f"gd_poll:{game_day_id}"),
     )
     builder.row(
