@@ -180,7 +180,10 @@ async def _run_migrations(conn):
         await conn.execute(text(
             "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS default_player_limit INTEGER DEFAULT 20"
         ))
-        # user_activity создаётся через Base.metadata.create_all — дополнительных миграций не требуется
+        await conn.execute(text(
+            "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_method VARCHAR(10)"
+        ))
+        # user_activity, broadcast_logs создаются через Base.metadata.create_all — дополнительных миграций не требуется
 
 
 async def _run_enum_migrations(conn) -> None:

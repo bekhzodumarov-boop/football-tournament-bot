@@ -439,20 +439,28 @@ async def gd_payment(call: CallbackQuery, session: AsyncSession):
     )
     payments_map = {p.player_id: p for p in payments_result.scalars().all()}
 
+    _method_emoji = {"cash": "💵", "card": "💳"}
+    total = len(attendances)
+    paid_count = sum(1 for pid, p in payments_map.items() if p.paid)
+
     builder = InlineKeyboardBuilder()
     for att in attendances:
         payment = payments_map.get(att.player_id)
         paid = payment and payment.paid
-        emoji = "✅" if paid else "❌"
+        method = payment.payment_method if payment else None
+        pay_emoji = "✅" if paid else "❌"
+        method_tag = f" {_method_emoji[method]}" if method else ""
         builder.button(
-            text=f"{emoji} {att.player.name}",
+            text=f"{pay_emoji}{method_tag} {att.player.name}",
             callback_data=f"toggle_pay:{game_day_id}:{att.player_id}"
         )
     builder.adjust(1)
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
 
+    gd_name = game_day.display_name if game_day else game_day.scheduled_at.strftime('%d.%m.%Y')
     await call.message.edit_text(
-        f"💰 <b>Оплата — {game_day.scheduled_at.strftime('%d.%m.%Y')}</b>\n\n"
+        f"💰 <b>Оплата — {gd_name}</b>\n\n"
+        f"✅ Оплатили: {paid_count}/{total}\n\n"
         "Нажми на игрока чтобы отметить оплату:",
         reply_markup=builder.as_markup()
     )
@@ -494,6 +502,57 @@ async def toggle_payment(call: CallbackQuery, session: AsyncSession):
     await call.answer("✅ Статус оплаты обновлён")
     # Перезагрузить список
     await gd_payment(call, session)
+
+
+# ---------- Выбор способа оплаты (игроком) ----------
+
+@router.callback_query(F.data.startswith("pay_method:"))
+async def pay_method_choice(call: CallbackQuery, session: AsyncSession, player: Player | None):
+    await call.answer()
+    if not player:
+        return
+
+    parts = call.data.split(":")
+    method = parts[1]        # "cash" or "card"
+    game_day_id = int(parts[2])
+
+    result = await session.execute(
+        select(Payment).where(
+            Payment.game_day_id == game_day_id,
+            Payment.player_id == player.id,
+        )
+    )
+    payment = result.scalar_one_or_none()
+    game_day = await session.get(GameDay, game_day_id)
+
+    if payment:
+        payment.payment_method = method
+    else:
+        session.add(Payment(
+            game_day_id=game_day_id,
+            player_id=player.id,
+            amount=game_day.cost_per_player if game_day else 0,
+            paid=False,
+            payment_method=method,
+        ))
+    await session.commit()
+
+    lang = getattr(player, 'language', None) or 'ru'
+    labels = {
+        "cash": {"ru": "💵 Наличка", "en": "💵 Cash", "uz": "💵 Naqd pul", "de": "💵 Bargeld"},
+        "card": {"ru": "💳 Перевод на карту", "en": "💳 Bank transfer", "uz": "💳 Kartaga o'tkazma", "de": "💳 Überweisung"},
+    }
+    chosen = labels[method].get(lang, labels[method]["ru"])
+    confirmations = {
+        "ru": f"✅ Выбрано: {chosen}\n\nОрганизатор отметит оплату после получения.",
+        "en": f"✅ Selected: {chosen}\n\nThe organizer will confirm payment upon receipt.",
+        "uz": f"✅ Tanlandi: {chosen}\n\nTashkilotchi to'lovni qabul qilgandan so'ng belgilaydi.",
+        "de": f"✅ Ausgewählt: {chosen}\n\nDer Organisator bestätigt die Zahlung nach Eingang.",
+    }
+    await call.message.edit_text(
+        confirmations.get(lang, confirmations["ru"]),
+        parse_mode="HTML",
+    )
 
 
 # ---------- Отменить игру ----------

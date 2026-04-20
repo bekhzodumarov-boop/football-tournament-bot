@@ -301,6 +301,8 @@ class Payment(Base):
     amount: Mapped[int] = mapped_column(Integer)
     paid: Mapped[bool] = mapped_column(Boolean, default=False)
     paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    payment_method: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    # "cash" = наличка, "card" = перевод на карту, None = не выбрал
 
     game_day: Mapped["GameDay"] = relationship(back_populates="payments")
     player: Mapped["Player"] = relationship(back_populates="payments")

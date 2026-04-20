@@ -96,6 +96,24 @@ def game_day_action_kb(game_day_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def payment_method_kb(game_day_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
+    """Кнопки выбора способа оплаты для игрока."""
+    builder = InlineKeyboardBuilder()
+    cash_label = {"ru": "💵 Наличка", "en": "💵 Cash", "uz": "💵 Naqd pul", "de": "💵 Bargeld"}
+    card_label = {"ru": "💳 Перевод на карту", "en": "💳 Bank transfer", "uz": "💳 Kartaga o'tkazma", "de": "💳 Überweisung"}
+    builder.row(
+        InlineKeyboardButton(
+            text=cash_label.get(lang, cash_label["ru"]),
+            callback_data=f"pay_method:cash:{game_day_id}",
+        ),
+        InlineKeyboardButton(
+            text=card_label.get(lang, card_label["ru"]),
+            callback_data=f"pay_method:card:{game_day_id}",
+        ),
+    )
+    return builder.as_markup()
+
+
 def delete_confirm_kb(game_day_id: int) -> InlineKeyboardMarkup:
     """Подтверждение удаления игрового дня."""
     builder = InlineKeyboardBuilder()

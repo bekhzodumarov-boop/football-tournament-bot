@@ -576,7 +576,18 @@ async def _broadcast_finance(msg, state: FSMContext, session: AsyncSession,
                           location=game_day.location,
                           amount=f"{cost_per:,}")
             card_line = f"\n\n💳 <b>Номер карты для оплаты:</b>\n<code>{card_number}</code>"
-            await bot.send_message(p.telegram_id, base_text + card_line)
+            method_prompt = {
+                "ru": "\n\nКак будешь платить? 👇",
+                "en": "\n\nHow will you pay? 👇",
+                "uz": "\n\nQanday to'laysiz? 👇",
+                "de": "\n\nWie wirst du zahlen? 👇",
+            }
+            from app.keyboards.game_day import payment_method_kb
+            await bot.send_message(
+                p.telegram_id,
+                base_text + card_line + method_prompt.get(lang, method_prompt["ru"]),
+                reply_markup=payment_method_kb(game_day_id, lang),
+            )
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
