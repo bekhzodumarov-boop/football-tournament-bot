@@ -52,6 +52,9 @@ async def create_db_and_tables():
     # Загрузить ID создателей лиг в рантайм-кэш
     await _load_league_admins()
 
+    # Автозакрытие просроченных турниров
+    await _finish_overdue_game_days()
+
 
 async def _run_migrations(conn):
     """ALTER TABLE миграции — добавляем колонки если их нет."""
@@ -316,6 +319,33 @@ async def _load_league_admins() -> None:
         )
         ids = [row[0] for row in result.fetchall() if row[0]]
         load_league_admins(ids)
+
+
+async def _finish_overdue_game_days() -> None:
+    """
+    При старте: переводить игровые дни в FINISHED если scheduled_at
+    прошёл более 12 часов назад и статус всё ещё ANNOUNCED/CLOSED/IN_PROGRESS.
+    Это закрывает турниры, которые не были завершены вручную.
+    """
+    from datetime import datetime, timedelta
+    from sqlalchemy import select, update
+    from app.database.models import GameDay, GameDayStatus
+
+    cutoff = datetime.now() - timedelta(hours=12)
+    async with AsyncSessionFactory() as session:
+        await session.execute(
+            update(GameDay)
+            .where(
+                GameDay.scheduled_at < cutoff,
+                GameDay.status.in_([
+                    GameDayStatus.ANNOUNCED,
+                    GameDayStatus.CLOSED,
+                    GameDayStatus.IN_PROGRESS,
+                ])
+            )
+            .values(status=GameDayStatus.FINISHED)
+        )
+        await session.commit()
 
 
 async def get_session() -> AsyncSession:
