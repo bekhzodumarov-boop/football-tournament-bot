@@ -183,6 +183,45 @@ def _timer_text_seconds(home: str, away: str, started_at: datetime, total_second
     )
 
 
+async def _notify_next_match(bot, session: AsyncSession, finished_match: Match) -> None:
+    """После завершения матча — найти следующий по расписанию и уведомить участников."""
+    try:
+        if not finished_match.match_order or finished_match.match_order <= 0:
+            return  # матч не из расписания, пропускаем
+
+        next_result = await session.execute(
+            select(Match)
+            .options(selectinload(Match.team_home), selectinload(Match.team_away))
+            .where(
+                Match.game_day_id == finished_match.game_day_id,
+                Match.match_order > finished_match.match_order,
+                Match.status == MatchStatus.SCHEDULED,
+            )
+            .order_by(Match.match_order)
+            .limit(1)
+        )
+        next_match = next_result.scalar_one_or_none()
+        if not next_match:
+            return  # расписание завершено
+
+        home_name = next_match.team_home.name
+        away_name = next_match.team_away.name
+        msg = (
+            f"📣 <b>Следующий матч #{next_match.match_order}!</b>\n\n"
+            f"⚽ <b>{home_name} vs {away_name}</b>\n\n"
+            f"Готовьтесь к выходу на поле!"
+        )
+
+        game_day_players = await _get_attendees(session, finished_match.game_day_id)
+        for p in game_day_players:
+            try:
+                await bot.send_message(p.telegram_id, msg, parse_mode="HTML")
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"_notify_next_match error: {e}")
+
+
 async def _auto_finish_match(match_id: int, timer_data: dict) -> None:
     """Авто-завершение матча по истечению таймера."""
     from app.database.engine import AsyncSessionFactory
@@ -218,6 +257,8 @@ async def _auto_finish_match(match_id: int, timer_data: dict) -> None:
                     await bot.send_message(p.telegram_id, _build_match_result_text(match, lang))
                 except Exception:
                     pass
+            # Уведомить о следующем матче по расписанию
+            await _notify_next_match(bot, session, match)
     except Exception as e:
         logger.error(f"Auto-finish match {match_id} error: {e}")
 
@@ -1230,6 +1271,9 @@ async def ref_finish_match(call: CallbackQuery, session: AsyncSession,
 
     if notified:
         await call.message.answer(f"📢 Результаты отправлены {notified} игрокам.")
+
+    # Уведомить о следующем матче по расписанию
+    await _notify_next_match(bot, session, match)
 
 
 # ─────────────────────────────────────────────
