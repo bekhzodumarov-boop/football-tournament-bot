@@ -353,6 +353,21 @@ class Card(Base):
     team: Mapped["Team"] = relationship()
 
 
+class MatchGoalkeeper(Base):
+    """Вратарь команды в матче (назначается рефери перед стартом или по ходу матча)."""
+    __tablename__ = "match_goalkeepers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"), index=True)
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
+    saves: Mapped[int] = mapped_column(Integer, default=0)  # сейвы за этот матч
+
+    match: Mapped["Match"] = relationship()
+    team: Mapped["Team"] = relationship()
+    player: Mapped["Player"] = relationship()
+
+
 class BroadcastLog(Base):
     """Лог всех рассылок: анонсы, напоминания, broadcast, итоги."""
     __tablename__ = "broadcast_logs"

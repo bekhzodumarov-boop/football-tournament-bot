@@ -36,6 +36,7 @@ from app.database.models import (
     Card, CardType,
     Player,
     MatchStage, MATCH_STAGE_LABELS,
+    MatchGoalkeeper,
 )
 from app.keyboards.referee import (
     referee_gamedays_kb, referee_gd_kb, referee_match_kb,
@@ -123,6 +124,24 @@ async def _get_team_players(session: AsyncSession, team_id: int) -> list[Player]
         .order_by(Player.name)
     )
     return result.scalars().all()
+
+
+async def _get_match_goalkeepers(session: AsyncSession, match_id: int) -> dict:
+    """Возвращает {'home': player_name or '', 'away': player_name or '', home_gk_id, away_gk_id, ...}"""
+    result = await session.execute(
+        select(MatchGoalkeeper)
+        .options(selectinload(MatchGoalkeeper.player))
+        .where(MatchGoalkeeper.match_id == match_id)
+    )
+    gks = result.scalars().all()
+    out = {"home": "", "away": "", "home_gk_id": None, "away_gk_id": None,
+           "home_saves": 0, "away_saves": 0, "home_team_id": None, "away_team_id": None}
+    for gk in gks:
+        # We'll determine home/away based on the match teams in the caller
+        out[f"gk_{gk.team_id}"] = gk.player.name
+        out[f"gk_saves_{gk.team_id}"] = gk.saves
+        out[f"gk_player_id_{gk.team_id}"] = gk.player_id
+    return out
 
 
 def _progress_bar(elapsed_sec: float, total_sec: float, width: int = 20) -> str:
@@ -234,6 +253,22 @@ def _match_panel_text(match: Match) -> str:
         text += "\n<b>Голы:</b>\n" + "\n".join(goals_lines) + "\n"
     if card_lines:
         text += "\n<b>Карточки:</b>\n" + "\n".join(card_lines) + "\n"
+    return text
+
+
+def _match_panel_text_with_gks(match: Match, gk_data: dict) -> str:
+    """Панель матча с информацией о вратарях и сейвах."""
+    text = _match_panel_text(match)
+    home_gk_name = gk_data.get(f"gk_{match.team_home_id}", "")
+    away_gk_name = gk_data.get(f"gk_{match.team_away_id}", "")
+    home_saves = gk_data.get(f"gk_saves_{match.team_home_id}", 0)
+    away_saves = gk_data.get(f"gk_saves_{match.team_away_id}", 0)
+    if home_gk_name or away_gk_name:
+        text += "\n<b>Вратари:</b>\n"
+        if home_gk_name:
+            text += f"  🧤 {match.team_home.name}: {home_gk_name} ({home_saves} сейв.)\n"
+        if away_gk_name:
+            text += f"  🧤 {match.team_away.name}: {away_gk_name} ({away_saves} сейв.)\n"
     return text
 
 
@@ -697,12 +732,18 @@ async def ref_match_panel(call: CallbackQuery, session: AsyncSession,
         await call.message.edit_text("❌ Матч не найден.")
         return
 
+    gk_data = await _get_match_goalkeepers(session, match_id)
+    home_gk = gk_data.get(f"gk_{match.team_home_id}", "")
+    away_gk = gk_data.get(f"gk_{match.team_away_id}", "")
+
     await call.message.edit_text(
         _match_panel_text(match),
         reply_markup=referee_match_kb(
             match_id,
             is_started=match.status == MatchStatus.IN_PROGRESS,
             is_finished=match.status == MatchStatus.FINISHED,
+            home_gk=home_gk,
+            away_gk=away_gk,
         )
     )
 
@@ -760,9 +801,13 @@ async def ref_start_timer(call: CallbackQuery, session: AsyncSession,
         max_instances=1,
     )
 
+    gk_data = await _get_match_goalkeepers(session, match_id)
+    home_gk = gk_data.get(f"gk_{match.team_home_id}", "")
+    away_gk = gk_data.get(f"gk_{match.team_away_id}", "")
     await call.message.edit_text(
         _match_panel_text(match),
-        reply_markup=referee_match_kb(match_id, is_started=True, is_finished=False)
+        reply_markup=referee_match_kb(match_id, is_started=True, is_finished=False,
+                                      home_gk=home_gk, away_gk=away_gk)
     )
 
 
@@ -883,12 +928,17 @@ async def ref_goal_record(call: CallbackQuery, session: AsyncSession,
     else:
         await call.answer(f"✅ Гол! {scorer.name}", show_alert=True)
 
+    gk_data = await _get_match_goalkeepers(session, match_id)
+    home_gk = gk_data.get(f"gk_{match.team_home_id}", "")
+    away_gk = gk_data.get(f"gk_{match.team_away_id}", "")
     await call.message.edit_text(
         _match_panel_text(match),
         reply_markup=referee_match_kb(
             match_id,
             is_started=match.status == MatchStatus.IN_PROGRESS,
             is_finished=match.status == MatchStatus.FINISHED,
+            home_gk=home_gk,
+            away_gk=away_gk,
         )
     )
 
@@ -1258,6 +1308,191 @@ async def ref_add_time(call: CallbackQuery, session: AsyncSession,
                 is_finished=match.status == MatchStatus.FINISHED,
             )
         )
+
+
+# ─────────────────────────────────────────────
+#  Назначить вратаря (Task 5)
+# ─────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("ref_set_gk:"))
+async def ref_set_gk_select(call: CallbackQuery, session: AsyncSession,
+                             player: Player | None):
+    """Выбор вратаря команды (хозяева/гости)."""
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    parts = call.data.split(":")
+    side = parts[1]      # "home" or "away"
+    match_id = int(parts[2])
+
+    match = await _load_match(session, match_id)
+    if not match:
+        return
+
+    team_id = match.team_home_id if side == "home" else match.team_away_id
+    team_name = match.team_home.name if side == "home" else match.team_away.name
+
+    # Показать всех игроков команды (или всех записавшихся если состав пуст)
+    players = await _get_team_players(session, team_id)
+    if not players:
+        players = await _get_attendees(session, match.game_day_id)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+    from aiogram.types import InlineKeyboardButton as IKBtn
+    builder = IKB()
+    for p in players:
+        builder.button(
+            text=p.name,
+            callback_data=f"ref_set_gk_save:{side}:{match_id}:{p.id}"
+        )
+    builder.adjust(2)
+    builder.row(IKBtn(text="🔙 Назад", callback_data=f"ref_match:{match_id}"))
+
+    await call.message.edit_text(
+        f"🧤 <b>Вратарь — {team_name}</b>\n\nКто встаёт на ворота?",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("ref_set_gk_save:"))
+async def ref_set_gk_save(call: CallbackQuery, session: AsyncSession,
+                           player: Player | None):
+    """Сохранить вратаря команды в матче."""
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    side = parts[1]
+    match_id = int(parts[2])
+    gk_player_id = int(parts[3])
+
+    match = await _load_match(session, match_id)
+    gk_player = await session.get(Player, gk_player_id)
+    if not match or not gk_player:
+        await call.answer("❌ Ошибка", show_alert=True)
+        return
+
+    team_id = match.team_home_id if side == "home" else match.team_away_id
+
+    # Удалить старую запись если есть
+    from sqlalchemy import delete as sql_delete
+    await session.execute(
+        sql_delete(MatchGoalkeeper).where(
+            MatchGoalkeeper.match_id == match_id,
+            MatchGoalkeeper.team_id == team_id,
+        )
+    )
+    session.add(MatchGoalkeeper(match_id=match_id, team_id=team_id, player_id=gk_player_id))
+    await session.commit()
+
+    await call.answer(f"🧤 {gk_player.name} назначен вратарём", show_alert=True)
+
+    match = await _load_match(session, match_id)
+    gk_data = await _get_match_goalkeepers(session, match_id)
+    home_gk = gk_data.get(f"gk_{match.team_home_id}", "")
+    away_gk = gk_data.get(f"gk_{match.team_away_id}", "")
+    await call.message.edit_text(
+        _match_panel_text(match),
+        reply_markup=referee_match_kb(
+            match_id,
+            is_started=match.status == MatchStatus.IN_PROGRESS,
+            is_finished=match.status == MatchStatus.FINISHED,
+            home_gk=home_gk,
+            away_gk=away_gk,
+        )
+    )
+
+
+# ─────────────────────────────────────────────
+#  Отметить сейв вратаря (Task 12)
+# ─────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("ref_save:"))
+async def ref_save_select_team(call: CallbackQuery, session: AsyncSession,
+                                player: Player | None):
+    """Выбор команды, чей вратарь сделал сейв."""
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    match_id = int(call.data.split(":")[1])
+    match = await _load_match(session, match_id)
+    if not match:
+        return
+
+    gk_data = await _get_match_goalkeepers(session, match_id)
+    home_gk = gk_data.get(f"gk_{match.team_home_id}", "")
+    away_gk = gk_data.get(f"gk_{match.team_away_id}", "")
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+    from aiogram.types import InlineKeyboardButton as IKBtn
+    builder = IKB()
+
+    if home_gk:
+        builder.row(IKBtn(
+            text=f"🧤 {match.team_home.name}: {home_gk}",
+            callback_data=f"ref_save_team:{match_id}:{match.team_home_id}"
+        ))
+    if away_gk:
+        builder.row(IKBtn(
+            text=f"🧤 {match.team_away.name}: {away_gk}",
+            callback_data=f"ref_save_team:{match_id}:{match.team_away_id}"
+        ))
+    if not home_gk and not away_gk:
+        await call.answer("⚠️ Назначь вратарей сначала", show_alert=True)
+        return
+    builder.row(IKBtn(text="🔙 Назад", callback_data=f"ref_match:{match_id}"))
+
+    await call.message.edit_text(
+        "🛡 <b>Сейв</b>\n\nВратарь какой команды сделал сейв?",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("ref_save_team:"))
+async def ref_save_record(call: CallbackQuery, session: AsyncSession,
+                           player: Player | None):
+    """Записать сейв вратарю команды."""
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    match_id = int(parts[1])
+    team_id = int(parts[2])
+
+    gk_result = await session.execute(
+        select(MatchGoalkeeper)
+        .options(selectinload(MatchGoalkeeper.player))
+        .where(MatchGoalkeeper.match_id == match_id, MatchGoalkeeper.team_id == team_id)
+    )
+    gk = gk_result.scalar_one_or_none()
+    if not gk:
+        await call.answer("⚠️ Вратарь не назначен", show_alert=True)
+        return
+
+    gk.saves += 1
+    await session.commit()
+    await call.answer(f"🛡 Сейв! {gk.player.name} (всего: {gk.saves})", show_alert=True)
+
+    match = await _load_match(session, match_id)
+    gk_data = await _get_match_goalkeepers(session, match_id)
+    home_gk = gk_data.get(f"gk_{match.team_home_id}", "")
+    away_gk = gk_data.get(f"gk_{match.team_away_id}", "")
+    await call.message.edit_text(
+        _match_panel_text(match),
+        reply_markup=referee_match_kb(
+            match_id,
+            is_started=match.status == MatchStatus.IN_PROGRESS,
+            is_finished=match.status == MatchStatus.FINISHED,
+            home_gk=home_gk,
+            away_gk=away_gk,
+        )
+    )
 
 
 # ─────────────────────────────────────────────

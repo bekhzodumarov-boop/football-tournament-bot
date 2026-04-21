@@ -58,7 +58,8 @@ def referee_gd_kb(game_day_id: int, matches: list) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def referee_match_kb(match_id: int, is_started: bool, is_finished: bool) -> InlineKeyboardMarkup:
+def referee_match_kb(match_id: int, is_started: bool, is_finished: bool,
+                     home_gk: str = "", away_gk: str = "") -> InlineKeyboardMarkup:
     """Панель управления матчем"""
     builder = InlineKeyboardBuilder()
     if is_finished:
@@ -91,6 +92,20 @@ def referee_match_kb(match_id: int, is_started: bool, is_finished: bool) -> Inli
                 text="🔄 Замена",
                 callback_data=f"ref_sub:{match_id}"
             ))
+
+    # Вратари и сейвы
+    home_gk_label = f"🧤 Хозяева: {home_gk}" if home_gk else "🧤 Назначить вратаря хозяев"
+    away_gk_label = f"🧤 Гости: {away_gk}" if away_gk else "🧤 Назначить вратаря гостей"
+    builder.row(
+        InlineKeyboardButton(text=home_gk_label, callback_data=f"ref_set_gk:home:{match_id}"),
+        InlineKeyboardButton(text=away_gk_label, callback_data=f"ref_set_gk:away:{match_id}"),
+    )
+    if home_gk or away_gk:
+        builder.row(InlineKeyboardButton(
+            text="🛡 Отметить сейв",
+            callback_data=f"ref_save:{match_id}"
+        ))
+
     return builder.as_markup()
 
 
