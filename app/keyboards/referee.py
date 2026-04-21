@@ -59,11 +59,17 @@ def referee_gd_kb(game_day_id: int, matches: list) -> InlineKeyboardMarkup:
 
 
 def referee_match_kb(match_id: int, is_started: bool, is_finished: bool,
-                     home_gk: str = "", away_gk: str = "") -> InlineKeyboardMarkup:
+                     home_gk: str = "", away_gk: str = "",
+                     show_penalty: bool = False) -> InlineKeyboardMarkup:
     """Панель управления матчем"""
     builder = InlineKeyboardBuilder()
     if is_finished:
         builder.row(InlineKeyboardButton(text="✅ Матч завершён", callback_data="noop"))
+        if show_penalty:
+            builder.row(InlineKeyboardButton(
+                text="🥅 Серия пенальти",
+                callback_data=f"ref_penalty:{match_id}"
+            ))
         # Постфактум: добавить события после финального свистка
         builder.row(
             InlineKeyboardButton(text="🥅 +Гол", callback_data=f"ref_goal:{match_id}"),

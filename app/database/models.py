@@ -61,6 +61,7 @@ class MatchFormat(str, PyEnum):
 class GoalType(str, PyEnum):
     GOAL = "goal"
     OWN_GOAL = "own_goal"
+    PENALTY = "penalty"  # гол с пенальти (серия)
 
 class CardType(str, PyEnum):
     YELLOW = "yellow"
@@ -351,6 +352,28 @@ class Card(Base):
     match: Mapped["Match"] = relationship(back_populates="cards")
     player: Mapped["Player"] = relationship()
     team: Mapped["Team"] = relationship()
+
+
+class PenaltyShootout(Base):
+    """Серия пенальти для плей-офф матча."""
+    __tablename__ = "penalty_shootouts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"), unique=True, index=True)
+    # Кто бьёт первым
+    first_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    # Счёт серии пенальти (отдельно от основного счёта)
+    score_home: Mapped[int] = mapped_column(Integer, default=0)
+    score_away: Mapped[int] = mapped_column(Integer, default=0)
+    # Текущая серия: который по счёту удар (1-5, потом >5 = sudden death)
+    kick_number: Mapped[int] = mapped_column(Integer, default=1)
+    # 0 = бьёт первая команда, 1 = бьёт вторая
+    current_side: Mapped[int] = mapped_column(Integer, default=0)
+    finished: Mapped[bool] = mapped_column(Boolean, default=False)
+    winner_team_id: Mapped[Optional[int]] = mapped_column(ForeignKey("teams.id"), nullable=True)
+
+    match: Mapped["Match"] = relationship()
+    first_team: Mapped["Team"] = relationship(foreign_keys=[first_team_id])
 
 
 class MatchGoalkeeper(Base):

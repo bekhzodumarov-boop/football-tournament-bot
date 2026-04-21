@@ -37,6 +37,7 @@ from app.database.models import (
     Player,
     MatchStage, MATCH_STAGE_LABELS,
     MatchGoalkeeper,
+    PenaltyShootout,
 )
 from app.keyboards.referee import (
     referee_gamedays_kb, referee_gd_kb, referee_match_kb,
@@ -1339,9 +1340,20 @@ async def ref_finish_match(call: CallbackQuery, session: AsyncSession,
     # Build admin display text (Russian)
     result_text = _build_match_result_text(match, 'ru')
 
+    # Проверить: плей-офф + ничья → предложить серию пенальти
+    is_playoff = match.match_stage in ("semifinal", "third_place", "final")
+    is_draw = match.score_home == match.score_away
+    show_penalty = is_playoff and is_draw
+
+    gk_data = await _get_match_goalkeepers(session, match_id)
+    home_gk = gk_data.get(f"gk_{match.team_home_id}", "")
+    away_gk = gk_data.get(f"gk_{match.team_away_id}", "")
+
     await call.message.edit_text(
         result_text,
-        reply_markup=referee_match_kb(match_id, is_started=True, is_finished=True)
+        reply_markup=referee_match_kb(match_id, is_started=True, is_finished=True,
+                                      home_gk=home_gk, away_gk=away_gk,
+                                      show_penalty=show_penalty)
     )
 
     # Разослать результаты участникам (per-language)
@@ -2258,3 +2270,279 @@ async def ref_sub_execute(call: CallbackQuery, session: AsyncSession,
             is_finished=match.status == MatchStatus.FINISHED,
         )
     )
+
+
+# ─────────────────────────────────────────────
+#  СЕРИЯ ПЕНАЛЬТИ (Task 13)
+# ─────────────────────────────────────────────
+
+import random as _random
+
+
+def _penalty_kb(shootout: PenaltyShootout, match: Match) -> "InlineKeyboardMarkup":
+    """Клавиатура серии пенальти."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+    from aiogram.types import InlineKeyboardButton as IKBtn
+    builder = IKB()
+
+    if not shootout.finished:
+        # Кто сейчас бьёт?
+        side = shootout.current_side  # 0 = first_team, 1 = second_team
+        if side == 0:
+            shooting_team = match.team_home if shootout.first_team_id == match.team_home_id else match.team_away
+        else:
+            shooting_team = match.team_away if shootout.first_team_id == match.team_home_id else match.team_home
+
+        builder.row(
+            IKBtn(text=f"⚽ Гол!", callback_data=f"ref_pen_kick:goal:{shootout.id}"),
+            IKBtn(text=f"🛡 Сейв", callback_data=f"ref_pen_kick:save:{shootout.id}"),
+        )
+        builder.row(IKBtn(
+            text=f"❌ Мимо", callback_data=f"ref_pen_kick:miss:{shootout.id}"
+        ))
+
+    builder.row(IKBtn(text="🔙 К матчу", callback_data=f"ref_match:{shootout.match_id}"))
+    return builder.as_markup()
+
+
+def _penalty_text(shootout: PenaltyShootout, match: Match) -> str:
+    home = match.team_home.name
+    away = match.team_away.name
+
+    # Определяем очерёдность
+    if shootout.first_team_id == match.team_home_id:
+        first_name, second_name = home, away
+        first_score = shootout.score_home
+        second_score = shootout.score_away
+    else:
+        first_name, second_name = away, home
+        first_score = shootout.score_away
+        second_score = shootout.score_home
+
+    text = (
+        f"🥅 <b>Серия пенальти</b>\n\n"
+        f"⚽ {home}  {match.score_home}:{match.score_away}  {away}\n"
+        f"<b>Пенальти: {first_name} {first_score} : {second_score} {second_name}</b>\n\n"
+        f"Удар #{shootout.kick_number} | Бьёт: <b>"
+    )
+
+    if shootout.finished:
+        winner_id = shootout.winner_team_id
+        winner = home if winner_id == match.team_home_id else away
+        text = (
+            f"🏆 <b>Победа в серии пенальти!</b>\n\n"
+            f"⚽ {home} {match.score_home}:{match.score_away} {away}\n"
+            f"🥅 Пенальти: {first_name} {first_score}:{second_score} {second_name}\n\n"
+            f"🏆 Победитель: <b>{winner}</b>"
+        )
+        return text
+
+    # Чья очередь?
+    if shootout.current_side == 0:
+        current_team = first_name
+    else:
+        current_team = second_name
+    text += f"{current_team}</b>"
+    return text
+
+
+@router.callback_query(F.data.startswith("ref_penalty:"))
+async def ref_penalty_start(call: CallbackQuery, session: AsyncSession,
+                             player: Player | None):
+    """Начать серию пенальти для плей-офф матча в ничью."""
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    match_id = int(call.data.split(":")[1])
+    match = await _load_match(session, match_id)
+    if not match:
+        return
+
+    # Проверить что матч в ничью и плей-офф
+    if match.score_home != match.score_away:
+        await call.answer("⚠️ Серия пенальти только при ничьей", show_alert=True)
+        return
+    if match.match_stage not in ("semifinal", "third_place", "final"):
+        await call.answer("⚠️ Серия пенальти только в плей-офф", show_alert=True)
+        return
+
+    # Проверить нет ли уже серии
+    existing = await session.execute(
+        select(PenaltyShootout).where(PenaltyShootout.match_id == match_id)
+    )
+    if existing.scalar_one_or_none():
+        await call.answer("⚠️ Серия уже начата", show_alert=True)
+        return
+
+    # Случайный выбор первой команды
+    first_team_id = _random.choice([match.team_home_id, match.team_away_id])
+    shootout = PenaltyShootout(
+        match_id=match_id,
+        first_team_id=first_team_id,
+        score_home=0,
+        score_away=0,
+        kick_number=1,
+        current_side=0,
+    )
+    session.add(shootout)
+    await session.commit()
+
+    first_team = match.team_home if first_team_id == match.team_home_id else match.team_away
+    await call.answer(f"🎲 {first_team.name} бьёт первыми!", show_alert=True)
+
+    # Обновить сообщение
+    shootout = (await session.execute(
+        select(PenaltyShootout).where(PenaltyShootout.match_id == match_id)
+    )).scalar_one()
+
+    await call.message.edit_text(
+        _penalty_text(shootout, match),
+        reply_markup=_penalty_kb(shootout, match)
+    )
+
+
+@router.callback_query(F.data.startswith("ref_pen_kick:"))
+async def ref_pen_kick(call: CallbackQuery, session: AsyncSession,
+                       player: Player | None, bot: Bot):
+    """Зафиксировать удар в серии пенальти: goal/save/miss."""
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    result = parts[1]   # "goal" / "save" / "miss"
+    shootout_id = int(parts[2])
+
+    shootout = await session.get(PenaltyShootout, shootout_id)
+    if not shootout or shootout.finished:
+        await call.answer("⚠️ Серия завершена", show_alert=True)
+        return
+
+    match = await _load_match(session, shootout.match_id)
+    if not match:
+        return
+
+    # Какая команда сейчас бьёт?
+    is_first_team_shooting = shootout.current_side == 0
+    if is_first_team_shooting:
+        shooting_team_id = shootout.first_team_id
+    else:
+        shooting_team_id = (
+            match.team_away_id if shootout.first_team_id == match.team_home_id
+            else match.team_home_id
+        )
+
+    is_home_shooting = shooting_team_id == match.team_home_id
+
+    if result == "goal":
+        # Записать гол — выбрать случайного игрока из команды (нет возможности выбрать конкретного)
+        # Попробуем найти любого игрока этой команды
+        players_res = await session.execute(
+            select(Player)
+            .join(TeamPlayer, TeamPlayer.player_id == Player.id)
+            .where(TeamPlayer.team_id == shooting_team_id)
+            .limit(1)
+        )
+        scorer = players_res.scalar_one_or_none()
+        if scorer:
+            session.add(Goal(
+                match_id=match.id,
+                player_id=scorer.id,
+                team_id=shooting_team_id,
+                goal_type=GoalType.PENALTY,
+                scored_at=datetime.now(),
+            ))
+        # Обновить счёт пенальти
+        if is_home_shooting:
+            shootout.score_home += 1
+        else:
+            shootout.score_away += 1
+        await call.answer("⚽ Гол!")
+
+    elif result == "save":
+        # Записать сейв вратарю противоположной команды
+        defending_team_id = (
+            match.team_away_id if is_home_shooting else match.team_home_id
+        )
+        gk_res = await session.execute(
+            select(MatchGoalkeeper)
+            .where(MatchGoalkeeper.match_id == match.id,
+                   MatchGoalkeeper.team_id == defending_team_id)
+        )
+        gk = gk_res.scalar_one_or_none()
+        if gk:
+            gk.saves += 1
+        await call.answer("🛡 Сейв!")
+    else:
+        await call.answer("❌ Мимо")
+
+    # Перейти к следующему удару
+    # Чередуем: 0→1→0→1... После каждого полного раунда (оба команды ударили) kick_number += 1
+    next_side = 1 - shootout.current_side
+    if next_side == 0:
+        # Завершился раунд
+        shootout.kick_number += 1
+
+    shootout.current_side = next_side
+
+    # Проверка окончания серии (после каждых 5 ударов с каждой стороны)
+    winner_id = None
+    kicks_done_each = (shootout.kick_number - 1)  # кол-во раундов завершённых
+
+    if shootout.current_side == 0 and kicks_done_each >= 5:
+        # После 5 раундов: проверяем есть ли победитель
+        if shootout.score_home != shootout.score_away:
+            winner_id = match.team_home_id if shootout.score_home > shootout.score_away else match.team_away_id
+    elif shootout.current_side == 0 and kicks_done_each > 5:
+        # Sudden death: после каждого полного раунда проверяем
+        if shootout.score_home != shootout.score_away:
+            winner_id = match.team_home_id if shootout.score_home > shootout.score_away else match.team_away_id
+
+    # Также: если при незавершённой серии один уже не может догнать — досрочная победа
+    if not winner_id and shootout.current_side == 1 and kicks_done_each < 5:
+        # После первого удара в раунде — проверяем математическую невозможность
+        remaining = 5 - kicks_done_each - 1  # оставшихся ударов каждой
+        if shootout.score_home - shootout.score_away > remaining:
+            winner_id = match.team_home_id
+        elif shootout.score_away - shootout.score_home > remaining:
+            winner_id = match.team_away_id
+
+    if winner_id:
+        shootout.finished = True
+        shootout.winner_team_id = winner_id
+
+        # Обновить основной матч: добавить 1 к счёту победителя (условно - победа в серии)
+        # Не меняем score_home/score_away — они остаются как есть (ничья в основное время)
+
+    await session.commit()
+
+    # Перезагрузить и отобразить
+    shootout = await session.get(PenaltyShootout, shootout_id)
+    match = await _load_match(session, shootout.match_id)
+
+    await call.message.edit_text(
+        _penalty_text(shootout, match),
+        reply_markup=_penalty_kb(shootout, match)
+    )
+
+    # Если завершена — уведомить всех участников
+    if shootout.finished:
+        winner_team = match.team_home if shootout.winner_team_id == match.team_home_id else match.team_away
+        loser_team = match.team_away if shootout.winner_team_id == match.team_home_id else match.team_home
+        penalty_result = (
+            f"🥅 <b>Серия пенальти завершена!</b>\n\n"
+            f"⚽ {match.team_home.name} {match.score_home}:{match.score_away} {match.team_away.name}\n"
+            f"🥅 Пенальти: {shootout.score_home}:{shootout.score_away}\n\n"
+            f"🏆 Победитель: <b>{winner_team.name}</b>"
+        )
+        try:
+            game_day_players = await _get_attendees(session, match.game_day_id)
+            for p in game_day_players:
+                try:
+                    await bot.send_message(p.telegram_id, penalty_result, parse_mode="HTML")
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"penalty result notify error: {e}")
