@@ -8,9 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.models import (
-    Player, POSITION_LABELS,
+    Player, POSITION_LABELS, Position,
     GameDay, GameDayStatus, Match, MatchStatus, Team, TeamPlayer, League,
     Goal, GoalType, Card, CardType, PlayerLeague, LeagueRole,
+    MatchGoalkeeper,
 )
 from app.keyboards.main_menu import main_menu_kb, admin_menu_kb, language_kb, instructions_kb
 from app.locales.texts import t
@@ -535,6 +536,41 @@ async def cb_my_stats(call: CallbackQuery, player: Player | None, session: Async
     )
     red_cards = red_result.scalar() or 0
 
+    # ── Win/Loss/Draw (по матчам TeamPlayer) ──
+    team_player_res = await session.execute(
+        select(TeamPlayer).where(TeamPlayer.player_id == player.id)
+    )
+    tp_list = team_player_res.scalars().all()
+    team_ids = {tp.team_id for tp in tp_list}
+
+    wins = draws = losses = 0
+    if team_ids:
+        matches_res = await session.execute(
+            select(Match).where(
+                Match.status == MatchStatus.FINISHED,
+                (Match.team_home_id.in_(team_ids) | Match.team_away_id.in_(team_ids)),
+            )
+        )
+        for m in matches_res.scalars().all():
+            # Какая команда наша?
+            is_home = m.team_home_id in team_ids
+            is_away = m.team_away_id in team_ids
+            if is_home:
+                gf, ga = m.score_home, m.score_away
+            elif is_away:
+                gf, ga = m.score_away, m.score_home
+            else:
+                continue
+            if gf > ga:
+                wins += 1
+            elif gf == ga:
+                draws += 1
+            else:
+                losses += 1
+
+    games_obj = wins + draws + losses
+    win_pct = int(wins / games_obj * 100) if games_obj > 0 else 0
+
     text = t('my_stats_title', lang,
              name=player.name,
              games=player.games_played,
@@ -543,6 +579,46 @@ async def cb_my_stats(call: CallbackQuery, player: Player | None, session: Async
              red_cards=red_cards,
              reliability=f"{player.reliability_pct:.0f}",
              rating=f"{player.rating:.1f}")
+
+    # ── Объективная статистика ──
+    text += f"\n\n📊 <b>Объективная статистика:</b>"
+    if games_obj > 0:
+        text += f"\n  ⚽ Голов: {total_goals}   📈 Побед: {wins}  🤝 Ничьих: {draws}  📉 Поражений: {losses}"
+        text += f"\n  🏆 Процент побед: {win_pct}%"
+        card_penalty = yellow_cards * 1 + red_cards * 3
+        if card_penalty > 0:
+            text += f"\n  🟨 Штраф за карточки: -{card_penalty} пунктов"
+    else:
+        text += "\n  <i>Матчей ещё не сыграно</i>"
+
+    # ── Вратарская статистика (только для GK) ──
+    if player.position == Position.GK:
+        gk_res = await session.execute(
+            select(MatchGoalkeeper)
+            .options(selectinload(MatchGoalkeeper.match))
+            .where(MatchGoalkeeper.player_id == player.id)
+        )
+        gk_entries = gk_res.scalars().all()
+        total_saves = sum(g.saves for g in gk_entries)
+        gk_matches = len(gk_entries)
+        clean_sheets = 0
+        goals_conceded = 0
+        for gk in gk_entries:
+            m = gk.match
+            if m and m.status == MatchStatus.FINISHED:
+                ga = m.score_away if gk.team_id == m.team_home_id else m.score_home
+                goals_conceded += ga
+                if ga == 0:
+                    clean_sheets += 1
+
+        if gk_matches > 0:
+            text += f"\n\n🧤 <b>Вратарская статистика:</b>"
+            text += f"\n  🛡 Сейвов: {total_saves}"
+            text += f"\n  ✅ Сухих матчей: {clean_sheets}/{gk_matches}"
+            text += f"\n  ❌ Пропущено голов: {goals_conceded}"
+        else:
+            text += f"\n\n🧤 <i>Вратарская статистика: нет данных</i>"
+
     await call.message.edit_text(text, reply_markup=main_menu_kb(lang))
 
 

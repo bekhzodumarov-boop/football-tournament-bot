@@ -435,6 +435,58 @@ async def ref_new_match_start(call: CallbackQuery, state: FSMContext,
     game_day_id = int(call.data.split(":")[1])
     await state.update_data(game_day_id=game_day_id, team1_player_ids=[], team2_player_ids=[])
 
+    # ── Task 15: проверить следующий матч по расписанию ──
+    # Найти последний завершённый или активный матч в расписании
+    last_order_res = await session.execute(
+        select(Match.match_order)
+        .where(
+            Match.game_day_id == game_day_id,
+            Match.match_order > 0,
+            Match.status.in_([MatchStatus.FINISHED, MatchStatus.IN_PROGRESS]),
+        )
+        .order_by(Match.match_order.desc())
+        .limit(1)
+    )
+    last_order = last_order_res.scalar() or 0
+
+    next_scheduled = await session.execute(
+        select(Match)
+        .options(selectinload(Match.team_home), selectinload(Match.team_away))
+        .where(
+            Match.game_day_id == game_day_id,
+            Match.match_order > last_order,
+            Match.status == MatchStatus.SCHEDULED,
+        )
+        .order_by(Match.match_order)
+        .limit(1)
+    )
+    sched_match = next_scheduled.scalar_one_or_none()
+
+    if sched_match:
+        # Предложить запустить этот матч сразу
+        from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+        from aiogram.types import InlineKeyboardButton as IKBtn
+        builder = IKB()
+        builder.row(IKBtn(
+            text=f"▶️ Запустить: {sched_match.team_home.name} vs {sched_match.team_away.name}",
+            callback_data=f"ref_match:{sched_match.id}"
+        ))
+        builder.row(IKBtn(
+            text="➕ Создать другой матч",
+            callback_data=f"ref_force_new:{game_day_id}"
+        ))
+        builder.row(IKBtn(
+            text="🔙 Назад",
+            callback_data=f"ref_gd:{game_day_id}"
+        ))
+        await call.message.edit_text(
+            f"📅 <b>Следующий матч по расписанию #{sched_match.match_order}:</b>\n\n"
+            f"⚽ <b>{sched_match.team_home.name} vs {sched_match.team_away.name}</b>\n\n"
+            "Запустить его или создать другой матч?",
+            reply_markup=builder.as_markup()
+        )
+        return
+
     # Проверить — есть ли уже созданные команды для этого игрового дня
     teams_result = await session.execute(
         select(Team).where(Team.game_day_id == game_day_id)
@@ -459,6 +511,41 @@ async def ref_new_match_start(call: CallbackQuery, state: FSMContext,
             "Введи название <b>Команды 1</b>:\n"
             "<i>Например: Красные, Команда А…</i>\n\n"
             "<i>💡 Совет: создай команды заранее через «👥 Составы команд»</i>"
+        )
+
+
+@router.callback_query(F.data.startswith("ref_force_new:"))
+async def ref_force_new_match(call: CallbackQuery, state: FSMContext,
+                               player: Player | None, session: AsyncSession):
+    """Принудительно создать новый матч, игнорируя расписание."""
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    await state.update_data(game_day_id=game_day_id, team1_player_ids=[], team2_player_ids=[])
+
+    teams_result = await session.execute(
+        select(Team).where(Team.game_day_id == game_day_id)
+    )
+    teams = teams_result.scalars().all()
+
+    if len(teams) >= 2:
+        await state.update_data(flow="existing")
+        await state.set_state(RefereeMatchFSM.waiting_pick_team1)
+        await call.message.edit_text(
+            "➕ <b>Новый матч</b>\n\nШаг 1 из 3\n\n"
+            "Выбери <b>Команду 1</b>:",
+            reply_markup=pick_team_kb("ref_pick_t1", game_day_id, teams)
+        )
+    else:
+        await state.update_data(flow="manual")
+        await state.set_state(RefereeMatchFSM.waiting_team1)
+        await call.message.edit_text(
+            "➕ <b>Новый матч</b>\n\nШаг 1 из 5\n\n"
+            "Введи название <b>Команды 1</b>:\n"
+            "<i>Например: Красные, Команда А…</i>"
         )
 
 
