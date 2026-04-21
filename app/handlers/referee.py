@@ -1785,9 +1785,10 @@ async def ref_sub_select_out(call: CallbackQuery, session: AsyncSession,
         return
 
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
-    players = await _get_team_players(session, team_id)
+    # Показываем ВСЕХ записавшихся — даже ранее заменённые могут снова выйти на поле
+    players = await _get_attendees(session, match.game_day_id)
     if not players:
-        players = await _get_attendees(session, match.game_day_id)
+        players = await _get_team_players(session, team_id)
 
     await call.message.edit_text(
         f"🔄 <b>Замена — {team_name}</b>\n\nКто <b>выходит</b> (покидает поле)?",
@@ -1816,19 +1817,12 @@ async def ref_sub_select_in(call: CallbackQuery, session: AsyncSession,
 
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
 
-    # Доступны для замены:
-    # 1. Записавшиеся на игровой день, но не в командах (скамейка)
-    # 2. Игроки из ДРУГОЙ команды этого матча (Т-023: взять из противника/партнёра)
+    # Доступны для замены: ВСЕ 19 записавшихся кроме самого выходящего
     all_attendees = await _get_attendees(session, match.game_day_id)
     team_home_players = await _get_team_players(session, match.team_home_id)
     team_away_players = await _get_team_players(session, match.team_away_id)
 
-    this_team_ids = {p.id for p in (team_home_players if team_id == match.team_home_id else team_away_players)}
-    # Исключаем только игрока из ЭТОЙ команды (кроме выходящего), доступны все остальные
-    available_subs = [
-        p for p in all_attendees
-        if p.id != player_out_id and p.id not in this_team_ids
-    ]
+    available_subs = [p for p in all_attendees if p.id != player_out_id]
 
     if not available_subs:
         await call.answer("⚠️ Нет доступных игроков для замены.", show_alert=True)

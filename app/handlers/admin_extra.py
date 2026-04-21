@@ -6,6 +6,7 @@
   - Моя лига
   - /create_league команда
 """
+from datetime import datetime
 from urllib.parse import quote
 import asyncio
 import logging
@@ -288,6 +289,11 @@ async def adm_past_detail(call: CallbackQuery, session: AsyncSession):
             lines.append(f"  ...и ещё {len(attendees) - 15} чел.")
 
     builder = InlineKeyboardBuilder()
+    if finished_matches:
+        builder.row(InlineKeyboardButton(
+            text="✏️ Редактировать результаты матчей",
+            callback_data=f"adm_edit_matches:{game_day_id}"
+        ))
     if game_day.cost_per_player == 0 and game_day.status == GameDayStatus.FINISHED:
         builder.row(InlineKeyboardButton(
             text="💸 Финансовый итог",
@@ -3617,4 +3623,437 @@ async def league_password_delete(call: CallbackQuery, session: AsyncSession):
     await call.message.edit_text(
         "✅ Пароль удалён. Лига открытая — любой может вступить.",
         reply_markup=_league_password_kb(league_id, False)
+    )
+
+
+# ══════════════════════════════════════════════════════
+#  РЕДАКТИРОВАНИЕ РЕЗУЛЬТАТОВ МАТЧЕЙ (Task 20)
+# ══════════════════════════════════════════════════════
+
+def _edit_match_kb(match_id: int, game_day_id: int, goals: list) -> "InlineKeyboardMarkup":
+    """Клавиатура редактирования матча."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔴−1", callback_data=f"adm_score:home:minus:{match_id}"),
+        InlineKeyboardButton(text="🔴+1", callback_data=f"adm_score:home:plus:{match_id}"),
+        InlineKeyboardButton(text="🔵−1", callback_data=f"adm_score:away:minus:{match_id}"),
+        InlineKeyboardButton(text="🔵+1", callback_data=f"adm_score:away:plus:{match_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="➕ Добавить гол", callback_data=f"adm_add_goal:{match_id}"),
+    )
+    if goals:
+        builder.row(
+            InlineKeyboardButton(text="🗑 Удалить гол", callback_data=f"adm_del_goal_list:{match_id}"),
+        )
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"adm_edit_matches:{game_day_id}"))
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("adm_edit_matches:"))
+async def adm_edit_matches(call: CallbackQuery, session: AsyncSession):
+    """Список матчей игрового дня для редактирования."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    result = await session.execute(
+        select(Match)
+        .options(selectinload(Match.team_home), selectinload(Match.team_away))
+        .where(Match.game_day_id == game_day_id)
+        .order_by(Match.match_order, Match.id)
+    )
+    matches = result.scalars().all()
+
+    if not matches:
+        await call.message.edit_text("⚠️ Матчей нет.")
+        return
+
+    builder = InlineKeyboardBuilder()
+    for m in matches:
+        status = "✅" if m.status == MatchStatus.FINISHED else "⏳"
+        builder.row(InlineKeyboardButton(
+            text=f"{status} {m.team_home.name} {m.score_home}:{m.score_away} {m.team_away.name}",
+            callback_data=f"adm_edit_match:{m.id}:{game_day_id}"
+        ))
+    builder.row(InlineKeyboardButton(
+        text="🔙 К игровому дню",
+        callback_data=f"adm_past_detail:{game_day_id}"
+    ))
+
+    await call.message.edit_text(
+        "✏️ <b>Редактирование матчей</b>\n\nВыбери матч:",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("adm_edit_match:"))
+async def adm_edit_match(call: CallbackQuery, session: AsyncSession):
+    """Панель редактирования конкретного матча."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    parts = call.data.split(":")
+    match_id = int(parts[1])
+    game_day_id = int(parts[2])
+
+    match = await session.get(
+        Match, match_id,
+        options=[
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        ]
+    )
+    if not match:
+        await call.message.edit_text("❌ Матч не найден.")
+        return
+
+    home = match.team_home.name
+    away = match.team_away.name
+    lines = [
+        f"✏️ <b>Редактирование матча</b>\n",
+        f"⚽ {home}  <b>{match.score_home}:{match.score_away}</b>  {away}\n",
+    ]
+
+    if match.goals:
+        lines.append("<b>Голы:</b>")
+        for i, g in enumerate(sorted(match.goals, key=lambda x: x.scored_at), 1):
+            team_name = home if g.team_id == match.team_home_id else away
+            own = " (авт.)" if g.goal_type == GoalType.OWN_GOAL else ""
+            lines.append(f"  {i}. ⚽ {g.player.name}{own} [{team_name}]")
+
+    await call.message.edit_text(
+        "\n".join(lines),
+        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals)
+    )
+
+
+@router.callback_query(F.data.startswith("adm_score:"))
+async def adm_score_adjust(call: CallbackQuery, session: AsyncSession):
+    """Изменить счёт матча на ±1."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    # format: adm_score:home/away:plus/minus:match_id
+    parts = call.data.split(":")
+    side = parts[1]      # "home" or "away"
+    direction = parts[2] # "plus" or "minus"
+    match_id = int(parts[3])
+
+    match = await session.get(
+        Match, match_id,
+        options=[
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        ]
+    )
+    if not match:
+        await call.answer("❌ Матч не найден", show_alert=True)
+        return
+
+    game_day_id = match.game_day_id
+    if side == "home":
+        new_val = max(0, match.score_home + (1 if direction == "plus" else -1))
+        match.score_home = new_val
+    else:
+        new_val = max(0, match.score_away + (1 if direction == "plus" else -1))
+        match.score_away = new_val
+
+    await session.commit()
+
+    # Refresh
+    match = await session.get(
+        Match, match_id,
+        options=[
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        ]
+    )
+
+    home = match.team_home.name
+    away = match.team_away.name
+    lines = [
+        f"✏️ <b>Редактирование матча</b>\n",
+        f"⚽ {home}  <b>{match.score_home}:{match.score_away}</b>  {away}\n",
+    ]
+    if match.goals:
+        lines.append("<b>Голы:</b>")
+        for i, g in enumerate(sorted(match.goals, key=lambda x: x.scored_at), 1):
+            team_name = home if g.team_id == match.team_home_id else away
+            own = " (авт.)" if g.goal_type == GoalType.OWN_GOAL else ""
+            lines.append(f"  {i}. ⚽ {g.player.name}{own} [{team_name}]")
+
+    await call.answer(f"✅ Счёт: {match.score_home}:{match.score_away}")
+    await call.message.edit_text(
+        "\n".join(lines),
+        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals)
+    )
+
+
+@router.callback_query(F.data.startswith("adm_add_goal:"))
+async def adm_add_goal_team(call: CallbackQuery, session: AsyncSession):
+    """Добавить гол: выбор команды."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    match_id = int(call.data.split(":")[1])
+    match = await session.get(
+        Match, match_id,
+        options=[selectinload(Match.team_home), selectinload(Match.team_away)]
+    )
+    if not match:
+        return
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=f"{match.team_home.name}",
+            callback_data=f"adm_add_goal_team:{match_id}:{match.team_home_id}:{match.game_day_id}"
+        ),
+        InlineKeyboardButton(
+            text=f"{match.team_away.name}",
+            callback_data=f"adm_add_goal_team:{match_id}:{match.team_away_id}:{match.game_day_id}"
+        ),
+    )
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data=f"adm_edit_match:{match_id}:{match.game_day_id}"
+    ))
+    await call.message.edit_text(
+        "➕ <b>Добавить гол</b>\n\nКакая команда забила?",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("adm_add_goal_team:"))
+async def adm_add_goal_player(call: CallbackQuery, session: AsyncSession):
+    """Добавить гол: выбор игрока."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    parts = call.data.split(":")
+    match_id = int(parts[1])
+    team_id = int(parts[2])
+    game_day_id = int(parts[3])
+
+    # Загружаем игроков команды
+    players_result = await session.execute(
+        select(Player)
+        .join(TeamPlayer, TeamPlayer.player_id == Player.id)
+        .where(TeamPlayer.team_id == team_id)
+        .order_by(Player.name)
+    )
+    players = players_result.scalars().all()
+    if not players:
+        # Fallback: все записавшиеся
+        players_result = await session.execute(
+            select(Player)
+            .join(Attendance, Attendance.player_id == Player.id)
+            .where(
+                Attendance.game_day_id == game_day_id,
+                Attendance.response == AttendanceResponse.YES,
+            )
+            .order_by(Player.name)
+        )
+        players = players_result.scalars().all()
+
+    builder = InlineKeyboardBuilder()
+    for p in players:
+        builder.button(
+            text=p.name,
+            callback_data=f"adm_add_goal_save:{match_id}:{team_id}:{p.id}:{game_day_id}"
+        )
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data=f"adm_edit_match:{match_id}:{game_day_id}"
+    ))
+
+    team = await session.get(Team, team_id)
+    await call.message.edit_text(
+        f"➕ <b>Гол — {team.name}</b>\n\nКто забил?",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("adm_add_goal_save:"))
+async def adm_add_goal_save(call: CallbackQuery, session: AsyncSession):
+    """Сохранить гол + пересчитать счёт."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    match_id = int(parts[1])
+    team_id = int(parts[2])
+    player_id = int(parts[3])
+    game_day_id = int(parts[4])
+
+    match = await session.get(
+        Match, match_id,
+        options=[selectinload(Match.team_home), selectinload(Match.team_away)]
+    )
+    scorer = await session.get(Player, player_id)
+    if not match or not scorer:
+        await call.answer("❌ Ошибка", show_alert=True)
+        return
+
+    session.add(Goal(
+        match_id=match_id, player_id=player_id, team_id=team_id,
+        goal_type=GoalType.GOAL, scored_at=datetime.now(),
+    ))
+    if team_id == match.team_home_id:
+        match.score_home += 1
+    else:
+        match.score_away += 1
+    await session.commit()
+
+    await call.answer(f"✅ Гол добавлен: {scorer.name}")
+
+    # Reload and show edit panel
+    match = await session.get(
+        Match, match_id,
+        options=[
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        ]
+    )
+    home = match.team_home.name
+    away = match.team_away.name
+    lines = [
+        f"✏️ <b>Редактирование матча</b>\n",
+        f"⚽ {home}  <b>{match.score_home}:{match.score_away}</b>  {away}\n",
+    ]
+    if match.goals:
+        lines.append("<b>Голы:</b>")
+        for i, g in enumerate(sorted(match.goals, key=lambda x: x.scored_at), 1):
+            team_name = home if g.team_id == match.team_home_id else away
+            own = " (авт.)" if g.goal_type == GoalType.OWN_GOAL else ""
+            lines.append(f"  {i}. ⚽ {g.player.name}{own} [{team_name}]")
+
+    await call.message.edit_text(
+        "\n".join(lines),
+        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals)
+    )
+
+
+@router.callback_query(F.data.startswith("adm_del_goal_list:"))
+async def adm_del_goal_list(call: CallbackQuery, session: AsyncSession):
+    """Показать список голов для удаления."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    match_id = int(call.data.split(":")[1])
+    match = await session.get(
+        Match, match_id,
+        options=[
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        ]
+    )
+    if not match or not match.goals:
+        await call.answer("⚠️ Голов нет", show_alert=True)
+        return
+
+    home = match.team_home.name
+    away = match.team_away.name
+    game_day_id = match.game_day_id
+
+    builder = InlineKeyboardBuilder()
+    for g in sorted(match.goals, key=lambda x: x.scored_at):
+        team_name = home if g.team_id == match.team_home_id else away
+        own = " (авт.)" if g.goal_type == GoalType.OWN_GOAL else ""
+        builder.row(InlineKeyboardButton(
+            text=f"🗑 {g.player.name}{own} [{team_name}]",
+            callback_data=f"adm_del_goal:{g.id}:{match_id}:{game_day_id}"
+        ))
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data=f"adm_edit_match:{match_id}:{game_day_id}"
+    ))
+
+    await call.message.edit_text(
+        f"🗑 <b>Удалить гол</b>\n\n{home} {match.score_home}:{match.score_away} {away}\n\n"
+        "Нажми на гол чтобы удалить:",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("adm_del_goal:"))
+async def adm_del_goal(call: CallbackQuery, session: AsyncSession):
+    """Удалить конкретный гол и пересчитать счёт."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    goal_id = int(parts[1])
+    match_id = int(parts[2])
+    game_day_id = int(parts[3])
+
+    goal = await session.get(Goal, goal_id)
+    match = await session.get(
+        Match, match_id,
+        options=[
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        ]
+    )
+    if not goal or not match:
+        await call.answer("❌ Ошибка", show_alert=True)
+        return
+
+    player_name = goal.player.name if goal.player else "?"
+    # Пересчитать счёт
+    if goal.team_id == match.team_home_id:
+        match.score_home = max(0, match.score_home - 1)
+    else:
+        match.score_away = max(0, match.score_away - 1)
+
+    await session.delete(goal)
+    await session.commit()
+    await call.answer(f"🗑 Гол {player_name} удалён")
+
+    # Reload and show edit panel
+    match = await session.get(
+        Match, match_id,
+        options=[
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        ]
+    )
+    home = match.team_home.name
+    away = match.team_away.name
+    lines = [
+        f"✏️ <b>Редактирование матча</b>\n",
+        f"⚽ {home}  <b>{match.score_home}:{match.score_away}</b>  {away}\n",
+    ]
+    if match.goals:
+        lines.append("<b>Голы:</b>")
+        for i, g in enumerate(sorted(match.goals, key=lambda x: x.scored_at), 1):
+            team_name = home if g.team_id == match.team_home_id else away
+            own = " (авт.)" if g.goal_type == GoalType.OWN_GOAL else ""
+            lines.append(f"  {i}. ⚽ {g.player.name}{own} [{team_name}]")
+
+    await call.message.edit_text(
+        "\n".join(lines),
+        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals)
     )
