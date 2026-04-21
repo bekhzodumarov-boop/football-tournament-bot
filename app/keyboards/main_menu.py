@@ -15,39 +15,24 @@ def main_menu_kb(
     )
     builder.row(
         InlineKeyboardButton(text=t("btn_my_team", lang), callback_data="my_team"),
-        InlineKeyboardButton(text=t("btn_top_scorers", lang), callback_data="top_scorers"),
+        InlineKeyboardButton(text=t("btn_results", lang), callback_data="match_results"),
     )
     builder.row(
         InlineKeyboardButton(text=t("btn_my_stats", lang), callback_data="my_stats"),
-        InlineKeyboardButton(text=t("btn_players_list", lang), callback_data="players_list"),
-    )
-    builder.row(
-        InlineKeyboardButton(text=t("btn_results", lang), callback_data="match_results"),
         InlineKeyboardButton(text=t("btn_profile", lang), callback_data="my_profile"),
     )
-    # Таблица: WebApp если URL задан, иначе обычная текстовая
-    if settings.WEBAPP_URL:
-        builder.row(
-            InlineKeyboardButton(text=t("btn_standings", lang), callback_data="tournament_standings"),
-            InlineKeyboardButton(
-                text="🌐 Живая таблица",
-                web_app=WebAppInfo(url=f"{settings.WEBAPP_URL.rstrip('/')}/")
-            ),
-        )
-    else:
-        builder.row(
-            InlineKeyboardButton(text=t("btn_standings", lang), callback_data="tournament_standings"),
-        )
+    builder.row(
+        InlineKeyboardButton(text=t("btn_top_scorers", lang), callback_data="top_scorers"),
+        InlineKeyboardButton(text=t("btn_players_list", lang), callback_data="players_list"),
+    )
     builder.row(
         InlineKeyboardButton(text=t("btn_rules", lang), callback_data="reglament"),
         InlineKeyboardButton(text="📖 Инструкция", callback_data="instructions"),
     )
-    # Мои лиги — всегда видна зарегистрированным игрокам
     builder.row(
         InlineKeyboardButton(text="🏆 Мои лиги", callback_data="my_leagues"),
         InlineKeyboardButton(text=t("btn_language", lang), callback_data="language_menu"),
     )
-    # Панель администратора — только для админов лиг
     if is_admin:
         builder.row(
             InlineKeyboardButton(text="🔧 Панель администратора", callback_data="admin_back"),
@@ -118,7 +103,7 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="📢 Опрос лиге", callback_data="admin_poll"),
-        InlineKeyboardButton(text="💳 Моя банковская карта", callback_data="admin_card"),
+        InlineKeyboardButton(text="💳 Карта для оплаты", callback_data="admin_card"),
     )
     builder.row(
         InlineKeyboardButton(text="📋 История рассылок", callback_data="admin_broadcast_history"),

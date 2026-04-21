@@ -133,26 +133,28 @@ def _progress_bar(elapsed_sec: float, total_sec: float, width: int = 20) -> str:
 
 def _timer_text(home: str, away: str, started_at: datetime, duration_min: int,
                 score_home: int = 0, score_away: int = 0) -> str:
-    elapsed = datetime.now() - started_at
-    total = timedelta(minutes=duration_min)
-    remaining = total - elapsed
-    elapsed_sec = max(elapsed.total_seconds(), 0)
-    total_sec = total.total_seconds()
+    return _timer_text_seconds(home, away, started_at, duration_min * 60, score_home, score_away)
 
-    if remaining.total_seconds() <= 0:
+
+def _timer_text_seconds(home: str, away: str, started_at: datetime, total_seconds: float,
+                        score_home: int = 0, score_away: int = 0) -> str:
+    elapsed = datetime.now() - started_at
+    elapsed_sec = max(elapsed.total_seconds(), 0)
+    remaining_sec = total_seconds - elapsed_sec
+
+    if remaining_sec <= 0:
         return (
             f"🔔 <b>ВРЕМЯ ВЫШЛО!</b>\n\n"
             f"⚽ <b>{home}  {score_home}:{score_away}  {away}</b>\n\n"
-            f"[{'█' * 20}] 100%\n\n"
-            "Зафиксируй финальный счёт!"
+            f"[{'█' * 20}] 100%"
         )
 
-    rem_min = int(remaining.total_seconds() // 60)
-    rem_sec = int(remaining.total_seconds() % 60)
+    rem_min = int(remaining_sec // 60)
+    rem_sec = int(remaining_sec % 60)
     el_min = int(elapsed_sec // 60)
     el_sec = int(elapsed_sec % 60)
-    pct = int(elapsed_sec / total_sec * 100)
-    bar = _progress_bar(elapsed_sec, total_sec)
+    pct = int(elapsed_sec / total_seconds * 100)
+    bar = _progress_bar(elapsed_sec, total_seconds)
     return (
         f"⏱ <b>Таймер матча</b>\n\n"
         f"⚽ <b>{home}  {score_home}:{score_away}  {away}</b>\n\n"
@@ -160,6 +162,45 @@ def _timer_text(home: str, away: str, started_at: datetime, duration_min: int,
         f"⬛ Прошло:    <b>{el_min}:{el_sec:02d}</b>\n"
         f"🔴 Осталось: <b>{rem_min}:{rem_sec:02d}</b>"
     )
+
+
+async def _auto_finish_match(match_id: int, timer_data: dict) -> None:
+    """Авто-завершение матча по истечению таймера."""
+    from app.database.engine import AsyncSessionFactory
+    bot = timer_data.get("bot")
+    if not bot:
+        return
+    try:
+        async with AsyncSessionFactory() as session:
+            match = await _load_match(session, match_id)
+            if not match or match.status == MatchStatus.FINISHED:
+                return
+            match.status = MatchStatus.FINISHED
+            match.finished_at = datetime.now()
+            await session.commit()
+            match = await _load_match(session, match_id)
+
+            result_text = _build_match_result_text(match, 'ru')
+            try:
+                await bot.edit_message_text(
+                    result_text,
+                    chat_id=timer_data["chat_id"],
+                    message_id=timer_data["message_id"],
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+            # Уведомить всех участников
+            game_day_players = await _get_attendees(session, match.game_day_id)
+            for p in game_day_players:
+                try:
+                    lang = getattr(p, 'language', None) or 'ru'
+                    await bot.send_message(p.telegram_id, _build_match_result_text(match, lang))
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f"Auto-finish match {match_id} error: {e}")
 
 
 def _match_panel_text(match: Match) -> str:
@@ -204,9 +245,12 @@ async def _update_timer_message(match_id: int):
     data = _active_timers.get(match_id)
     if not data:
         return
-    remaining = timedelta(minutes=data["duration_min"]) - (datetime.now() - data["started_at"])
-    text = _timer_text(
-        data["home"], data["away"], data["started_at"], data["duration_min"],
+    total_seconds = data.get("total_seconds", data["duration_min"] * 60)
+    elapsed = datetime.now() - data["started_at"]
+    remaining_sec = total_seconds - elapsed.total_seconds()
+
+    text = _timer_text_seconds(
+        data["home"], data["away"], data["started_at"], total_seconds,
         data.get("score_home", 0), data.get("score_away", 0),
     )
     try:
@@ -215,12 +259,15 @@ async def _update_timer_message(match_id: int):
         )
     except Exception as e:
         logger.warning(f"Timer message update failed for match {match_id}: {e}")
-    if remaining.total_seconds() <= 0:
+
+    if remaining_sec <= 0:
         try:
             scheduler.remove_job(f"timer_tick_{match_id}")
         except Exception:
             pass
         _active_timers.pop(match_id, None)
+        # Авто-завершение матча
+        await _auto_finish_match(match_id, data)
 
 
 # ─────────────────────────────────────────────
@@ -252,7 +299,6 @@ async def cmd_referee(message: Message, session: AsyncSession,
         "🦺 <b>Панель судьи</b>\n\nВыбери игровой день:",
         reply_markup=referee_gamedays_kb(game_days)
     )
-    await message.answer(INSTRUCTION_REFEREE)
 
 
 # ─────────────────────────────────────────────
@@ -697,6 +743,7 @@ async def ref_start_timer(call: CallbackQuery, session: AsyncSession,
         "message_id": timer_msg.message_id,
         "started_at": now,
         "duration_min": duration_min,
+        "total_seconds": duration_min * 60,
         "home": home,
         "away": away,
         "score_home": match.score_home,
@@ -1160,8 +1207,8 @@ async def ref_timer_status(call: CallbackQuery, session: AsyncSession,
     data = _active_timers.get(match_id)
     if data:
         elapsed = datetime.now() - data["started_at"]
-        remaining = timedelta(minutes=data["duration_min"]) - elapsed
-        rem_sec_total = max(int(remaining.total_seconds()), 0)
+        total_sec = data.get("total_seconds", data["duration_min"] * 60)
+        rem_sec_total = max(int(total_sec - elapsed.total_seconds()), 0)
         rem_min = rem_sec_total // 60
         rem_sec = rem_sec_total % 60
         await call.answer(f"⏱ Осталось: {rem_min}:{rem_sec:02d}")
@@ -1179,6 +1226,38 @@ async def ref_timer_status(call: CallbackQuery, session: AsyncSession,
             is_finished=match.status == MatchStatus.FINISHED,
         )
     )
+
+
+# ─────────────────────────────────────────────
+#  +30 секунд к таймеру
+# ─────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("ref_add_time:"))
+async def ref_add_time(call: CallbackQuery, session: AsyncSession,
+                       player: Player | None):
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    match_id = int(call.data.split(":")[1])
+    data = _active_timers.get(match_id)
+    if not data:
+        await call.answer("⚠️ Таймер не запущен", show_alert=True)
+        return
+
+    data["total_seconds"] = data.get("total_seconds", data["duration_min"] * 60) + 30
+    await call.answer("⏱ +30 секунд добавлено")
+
+    match = await _load_match(session, match_id)
+    if match:
+        await call.message.edit_text(
+            _match_panel_text(match),
+            reply_markup=referee_match_kb(
+                match_id,
+                is_started=match.status == MatchStatus.IN_PROGRESS,
+                is_finished=match.status == MatchStatus.FINISHED,
+            )
+        )
 
 
 # ─────────────────────────────────────────────

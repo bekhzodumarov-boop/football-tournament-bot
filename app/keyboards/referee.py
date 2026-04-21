@@ -16,25 +16,29 @@ def referee_gamedays_kb(game_days: list) -> InlineKeyboardMarkup:
 def referee_gd_kb(game_day_id: int, matches: list) -> InlineKeyboardMarkup:
     """Панель игрового дня для судьи"""
     builder = InlineKeyboardBuilder()
+    group_counter = 0
+    semifinal_counter = 0
     for match in matches:
         status_icon = "⏸" if match.status.value == "scheduled" else ("▶️" if match.status.value == "in_progress" else "✅")
-        text = (
-            f"{status_icon} {match.team_home.name} "
-            f"{match.score_home}:{match.score_away} "
-            f"{match.team_away.name}"
-        )
-        # Stage prefix for non-group matches
+        score = f"{match.score_home}:{match.score_away}"
         stage = getattr(match, "match_stage", "group") or "group"
-        stage_prefix = {
-            "semifinal": "🏆 ",
-            "third_place": "🥉 ",
-            "final": "🏆🏆 ",
-        }.get(stage, "")
-        # Schedule number prefix
         match_order = getattr(match, "match_order", 0) or 0
-        order_prefix = f"#{match_order} " if match_order > 0 else ""
+
+        if stage == "group":
+            group_counter += 1
+            label = f"Матч {match_order if match_order > 0 else group_counter}"
+        elif stage == "semifinal":
+            semifinal_counter += 1
+            label = f"Полуфинал {semifinal_counter}"
+        elif stage == "third_place":
+            label = "Матч за 3 место"
+        elif stage == "final":
+            label = "Финал"
+        else:
+            label = f"Матч {match_order}"
+
         builder.row(InlineKeyboardButton(
-            text=order_prefix + stage_prefix + text,
+            text=f"{status_icon} {label}: {match.team_home.name} {score} {match.team_away.name}",
             callback_data=f"ref_match:{match.id}"
         ))
     builder.row(InlineKeyboardButton(
@@ -71,10 +75,10 @@ def referee_match_kb(match_id: int, is_started: bool, is_finished: bool) -> Inli
             callback_data=f"ref_start:{match_id}"
         ))
     else:
-        builder.row(InlineKeyboardButton(
-            text="⏱ Статус таймера",
-            callback_data=f"ref_timer:{match_id}"
-        ))
+        builder.row(
+            InlineKeyboardButton(text="⏱ Статус таймера", callback_data=f"ref_timer:{match_id}"),
+            InlineKeyboardButton(text="⏱+30с", callback_data=f"ref_add_time:{match_id}"),
+        )
 
     if not is_finished:
         builder.row(
@@ -87,10 +91,6 @@ def referee_match_kb(match_id: int, is_started: bool, is_finished: bool) -> Inli
                 text="🔄 Замена",
                 callback_data=f"ref_sub:{match_id}"
             ))
-        builder.row(InlineKeyboardButton(
-            text="🏁 Завершить матч",
-            callback_data=f"ref_finish:{match_id}"
-        ))
     return builder.as_markup()
 
 

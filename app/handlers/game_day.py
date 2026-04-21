@@ -14,6 +14,8 @@ from app.config import settings
 from app.database.models import (
     GameDay, GameDayStatus, Attendance, AttendanceResponse,
     Player, MatchFormat, PlayerLeague, PlayerStatus,
+    Match, MatchStatus, Goal, GoalType, Card, CardType,
+    MatchStage, MATCH_STAGE_LABELS,
 )
 from app.keyboards.game_day import join_game_kb, join_confirm_kb, game_day_action_kb
 from app.data.reglament import REGLAMENT_AGREEMENT, REGLAMENT_AGREEMENT_EN
@@ -117,6 +119,123 @@ async def show_next_game(event, session: AsyncSession, player: Player | None):
     )
 
     await send(text, reply_markup=join_game_kb(game_day.id, game_day.is_open))
+
+
+# ---------- Таблица турнира (для игроков) ----------
+
+@router.callback_query(F.data.startswith("gd_standings:"))
+async def gd_standings(call: CallbackQuery, session: AsyncSession,
+                       player: Player | None):
+    await call.answer()
+    game_day_id = int(call.data.split(":")[1])
+
+    from collections import Counter
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+
+    all_matches_result = await session.execute(
+        select(Match)
+        .options(
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        )
+        .where(Match.game_day_id == game_day_id)
+        .order_by(Match.id)
+    )
+    all_matches = all_matches_result.scalars().all()
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data="next_game"
+    ))
+
+    if not all_matches:
+        await call.message.edit_text(
+            "📊 <b>Таблица турнира</b>\n\nМатчей ещё нет.",
+            reply_markup=builder.as_markup()
+        )
+        return
+
+    # ── Подсчёт очков (только групповой этап) ──
+    stats: dict[int, dict] = {}
+    for match in all_matches:
+        if match.status != MatchStatus.FINISHED:
+            continue
+        stage = match.match_stage or "group"
+        if stage != "group":
+            continue
+        for team, gf, ga in [
+            (match.team_home, match.score_home, match.score_away),
+            (match.team_away, match.score_away, match.score_home),
+        ]:
+            if team.id not in stats:
+                stats[team.id] = {
+                    "name": team.name, "emoji": team.color_emoji,
+                    "W": 0, "D": 0, "L": 0, "GF": 0, "GA": 0, "GP": 0,
+                }
+            s = stats[team.id]
+            s["GP"] += 1; s["GF"] += gf; s["GA"] += ga
+            if gf > ga: s["W"] += 1
+            elif gf == ga: s["D"] += 1
+            else: s["L"] += 1
+    for s in stats.values():
+        s["Pts"] = s["W"] * 3 + s["D"]
+    standings = sorted(stats.values(), key=lambda x: (-x["Pts"], -(x["GF"] - x["GA"]), -x["GF"]))
+
+    lines = ["📊 <b>Таблица турнира</b>\n"]
+    if standings:
+        lines.append("<code>№  Команда          И  В  Н  П  ГЗ ГП  О</code>")
+        lines.append("<code>" + "─" * 42 + "</code>")
+        for i, s in enumerate(standings, 1):
+            name = s["name"][:14].ljust(14)
+            row = (
+                f"{i:<3}{name} "
+                f"{s['GP']:<3}{s['W']:<3}{s['D']:<3}{s['L']:<3}"
+                f"{s['GF']:<3}{s['GA']:<3}{s['Pts']}"
+            )
+            lines.append(f"<code>{row}</code>")
+
+    # ── Матчи по стадиям ──
+    stage_order = ["group", "semifinal", "third_place", "final"]
+    stage_buckets: dict[str, list] = {s: [] for s in stage_order}
+    for m in all_matches:
+        stage_key = m.match_stage or "group"
+        stage_buckets.setdefault(stage_key, []).append(m)
+
+    for stage_key in stage_order:
+        bucket = stage_buckets.get(stage_key, [])
+        if not bucket:
+            continue
+        try:
+            label = MATCH_STAGE_LABELS[MatchStage(stage_key)]
+        except (ValueError, KeyError):
+            label = stage_key
+        lines.append(f"\n<b>{label}:</b>")
+        for m in bucket:
+            icon = "✅" if m.status == MatchStatus.FINISHED else (
+                "▶️" if m.status == MatchStatus.IN_PROGRESS else "⏳"
+            )
+            lines.append(
+                f"{icon} {m.team_home.name} "
+                f"<b>{m.score_home}:{m.score_away}</b> "
+                f"{m.team_away.name}"
+            )
+
+    # ── Бомбардиры ──
+    goal_counts: Counter = Counter()
+    for m in all_matches:
+        for g in m.goals:
+            if g.goal_type != GoalType.OWN_GOAL and g.player:
+                goal_counts[g.player.name] += 1
+    if goal_counts:
+        lines.append("\n⚽ <b>Бомбардиры:</b>")
+        for i, (name, cnt) in enumerate(goal_counts.most_common(5), 1):
+            suffix = "гол" if cnt == 1 else ("гола" if cnt <= 4 else "голов")
+            lines.append(f"  {i}. {name} — {cnt} {suffix}")
+
+    await call.message.edit_text("\n".join(lines), reply_markup=builder.as_markup())
 
 
 # ---------- Предварительный экран — согласие с Регламентом ----------

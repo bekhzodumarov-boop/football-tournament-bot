@@ -554,6 +554,22 @@ async def pay_method_choice(call: CallbackQuery, session: AsyncSession, player: 
         parse_mode="HTML",
     )
 
+    # Если выбрал перевод на карту — следующим сообщением отправить номер карты
+    if method == "card" and game_day and game_day.league_id:
+        from app.database.models import League
+        league = await session.get(League, game_day.league_id)
+        if league and league.card_number:
+            card_texts = {
+                "ru": f"💳 <b>Номер карты для перевода:</b>\n\n<code>{league.card_number}</code>",
+                "en": f"💳 <b>Card number for transfer:</b>\n\n<code>{league.card_number}</code>",
+                "uz": f"💳 <b>O'tkazma uchun karta raqami:</b>\n\n<code>{league.card_number}</code>",
+                "de": f"💳 <b>Kartennummer für die Überweisung:</b>\n\n<code>{league.card_number}</code>",
+            }
+            await call.message.answer(
+                card_texts.get(lang, card_texts["ru"]),
+                parse_mode="HTML",
+            )
+
 
 # ---------- Отменить игру ----------
 

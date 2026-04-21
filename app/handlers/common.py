@@ -87,8 +87,6 @@ async def cmd_start(message: Message, player: Player | None, state: FSMContext,
 
     if player is None:
         await message.answer(t('reg_welcome', 'ru'))
-        # Автоматически показываем инструкцию новому пользователю
-        await message.answer(INSTRUCTION_PLAYER)
         return
 
     pos_label = POSITION_LABELS.get(player.position, str(player.position))
@@ -234,11 +232,9 @@ async def cmd_admin(message: Message, player: Player | None, state: FSMContext,
         return
 
     await message.answer(
-        "🔧 <b>Панель администратора</b>\n\n"
-        "Выбери действие:",
+        "🔧 <b>Панель администратора</b>\n\nВыбери действие:",
         reply_markup=admin_menu_kb()
     )
-    await message.answer(INSTRUCTION_ADMIN)
 
 
 @router.callback_query(lambda c: c.data == "main_menu")
