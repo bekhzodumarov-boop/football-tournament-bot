@@ -2640,23 +2640,3 @@ def _check_penalty_winner(shootout: PenaltyShootout, match: Match) -> int | None
             return match.team_away_id
 
     return None
-
-    # Если завершена — уведомить всех участников
-    if shootout.finished:
-        winner_team = match.team_home if shootout.winner_team_id == match.team_home_id else match.team_away
-        loser_team = match.team_away if shootout.winner_team_id == match.team_home_id else match.team_home
-        penalty_result = (
-            f"🥅 <b>Серия пенальти завершена!</b>\n\n"
-            f"⚽ {match.team_home.name} {match.score_home}:{match.score_away} {match.team_away.name}\n"
-            f"🥅 Пенальти: {shootout.score_home}:{shootout.score_away}\n\n"
-            f"🏆 Победитель: <b>{winner_team.name}</b>"
-        )
-        try:
-            game_day_players = await _get_attendees(session, match.game_day_id)
-            for p in game_day_players:
-                try:
-                    await bot.send_message(p.telegram_id, penalty_result, parse_mode="HTML")
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.error(f"penalty result notify error: {e}")
