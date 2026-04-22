@@ -2671,12 +2671,13 @@ async def _gather_tournament_data(session, game_day_id: int) -> TournamentData |
     )
 
 
-def _format_match_line(m, with_scorers: bool = True) -> list[str]:
+def _format_match_line(m, with_scorers: bool = True, label: str = "") -> list[str]:
     """Форматирует одну строку матча + (опционально) авторов голов."""
     from app.database.models import GoalType
     lines = []
     score = f"{m.score_home}:{m.score_away}"
-    lines.append(f"  {m.team_home.name} <b>{score}</b> {m.team_away.name}")
+    prefix = f"{label}: " if label else ""
+    lines.append(f"  {prefix}{m.team_home.name} <b>{score}</b> {m.team_away.name}")
     if with_scorers and m.goals:
         home_scorers, away_scorers = [], []
         for g in m.goals:
@@ -2736,13 +2737,21 @@ def _format_channel_post(data: TournamentData) -> str:
             continue
         lines.append(f"<b>{stage_labels_ru.get(stage, stage)}:</b>")
         semi_n = 0
+        group_n = 0
         for m in matches_in_stage:
-            if stage == "semifinal":
+            if stage == "group":
+                group_n += 1
+                match_num = getattr(m, "match_order", 0) or group_n
+                label = f"Матч {match_num}"
+                lines.extend(_format_match_line(m, with_scorers=True, label=label))
+            elif stage == "semifinal":
                 semi_n += 1
-                lines.append(f"  Полуфинал {semi_n}:")
-                # indent scorer lines
-                for ml in _format_match_line(m, with_scorers=True):
-                    lines.append("  " + ml.strip())
+                label = f"Полуфинал {semi_n}"
+                lines.extend(_format_match_line(m, with_scorers=True, label=label))
+            elif stage == "third_place":
+                lines.extend(_format_match_line(m, with_scorers=True, label="Матч за 3-е место"))
+            elif stage == "final":
+                lines.extend(_format_match_line(m, with_scorers=True, label="Финал"))
             else:
                 lines.extend(_format_match_line(m, with_scorers=True))
         lines.append("")
@@ -2881,8 +2890,17 @@ def _format_personal_results(
         if stage != "group":
             lines.append(f"<i>{stage_labels_ru.get(stage, stage)}</i>")
         semi_n = 0
+        group_n = 0
         for m in ms:
-            lines.extend(_format_match_line(m, with_scorers=True))
+            if stage == "group":
+                group_n += 1
+                match_num = getattr(m, "match_order", 0) or group_n
+                lines.extend(_format_match_line(m, with_scorers=True, label=f"Матч {match_num}"))
+            elif stage == "semifinal":
+                semi_n += 1
+                lines.extend(_format_match_line(m, with_scorers=True, label=f"Полуфинал {semi_n}"))
+            else:
+                lines.extend(_format_match_line(m, with_scorers=True))
     lines.append("")
 
     # ── Топ-3 бомбардира ──
