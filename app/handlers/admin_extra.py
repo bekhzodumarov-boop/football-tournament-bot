@@ -294,6 +294,20 @@ async def adm_past_detail(call: CallbackQuery, session: AsyncSession):
             text="✏️ Редактировать результаты матчей",
             callback_data=f"adm_edit_matches:{game_day_id}"
         ))
+        builder.row(InlineKeyboardButton(
+            text="🏆 Итоги турнира",
+            callback_data=f"gd_tournament_results:{game_day_id}"
+        ))
+        builder.row(
+            InlineKeyboardButton(
+                text="📢 Разослать итоги",
+                callback_data=f"gd_post_results:{game_day_id}"
+            ),
+            InlineKeyboardButton(
+                text="📣 В канал",
+                callback_data=f"gd_to_channel:{game_day_id}"
+            ),
+        )
     if game_day.cost_per_player == 0 and game_day.status == GameDayStatus.FINISHED:
         builder.row(InlineKeyboardButton(
             text="💸 Финансовый итог",
