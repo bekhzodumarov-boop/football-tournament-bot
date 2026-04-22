@@ -2479,83 +2479,143 @@ async def rename_team_save(message: Message, state: FSMContext, session: AsyncSe
 
 
 # ══════════════════════════════════════════════════════
-#  ИТОГИ ТУРНИРА
+#  ИТОГИ ТУРНИРА — вспомогательные функции
 # ══════════════════════════════════════════════════════
 
-@router.callback_query(F.data.startswith("gd_tournament_results:"))
-async def gd_tournament_results(call: CallbackQuery, session: AsyncSession, bot: Bot):
-    if not settings.is_admin(call.from_user.id):
-        await call.answer("⛔", show_alert=True)
-        return
-    await call.answer()
+from dataclasses import dataclass, field
 
+@dataclass
+class TournamentData:
+    """Все данные о завершённом турнирном дне для формирования итогов."""
+    game_day: object
+    finished_matches: list
+    place_teams: dict          # place_num → Team object
+    # scorer_id → {"name": str, "count": int}
+    scorer_stats: dict
+    # player_id → {"name": str, "yellow": int, "red": int}
+    card_stats: dict
+    # team_id → {"team_name": str, "gk_name": str, "saves": int, "goals_conceded": int}
+    gk_stats: dict
+    best_player_name: str | None
+    total_goals: int
+    total_matches: int
+
+
+async def _gather_tournament_data(session, game_day_id: int) -> TournamentData | None:
+    """Загружает все данные турнирного дня одним запросом."""
     from collections import Counter
     from app.database.models import (
         Match, MatchStatus, Goal, GoalType, Card, CardType,
-        Team, TeamPlayer, RatingRound, RatingVote,
+        Team, RatingRound, MatchGoalkeeper,
     )
     from sqlalchemy.orm import selectinload
 
-    game_day_id = int(call.data.split(":")[1])
     game_day = await session.get(GameDay, game_day_id)
     if not game_day:
-        await call.message.edit_text("❌ Игровой день не найден.")
-        return
+        return None
 
-    # Load all finished matches with goals
+    # Все завершённые матчи + голы + карточки
     matches_res = await session.execute(
         select(Match)
         .options(
             selectinload(Match.team_home),
             selectinload(Match.team_away),
             selectinload(Match.goals).selectinload(Goal.player),
+            selectinload(Match.cards).selectinload(Card.player),
         )
         .where(Match.game_day_id == game_day_id, Match.status == MatchStatus.FINISHED)
         .order_by(Match.id)
     )
     finished_matches = matches_res.scalars().all()
-
     if not finished_matches:
-        await call.answer("⚠️ Нет завершённых матчей.", show_alert=True)
-        return
+        return None
 
-    # ── Determine places from FINAL and THIRD_PLACE matches ──
-    places: dict[int, str] = {}  # team_id → place label
+    # ── Места по финалу / матчу за 3-е ──
+    place_teams: dict[int, object] = {}
+    final_match = next((m for m in finished_matches if (m.match_stage or "group") == "final"), None)
+    third_match = next((m for m in finished_matches if (m.match_stage or "group") == "third_place"), None)
 
-    final_match = next(
-        (m for m in finished_matches if (m.match_stage or "group") == "final"), None
-    )
-    third_match = next(
-        (m for m in finished_matches if (m.match_stage or "group") == "third_place"), None
-    )
-
-    # Use place_teams: place_number → team_id
-    place_teams: dict[int, int] = {}
+    async def _team(team_id):
+        return await session.get(Team, team_id)
 
     if final_match:
         if final_match.score_home >= final_match.score_away:
-            place_teams[1] = final_match.team_home_id
-            place_teams[2] = final_match.team_away_id
+            place_teams[1] = await _team(final_match.team_home_id)
+            place_teams[2] = await _team(final_match.team_away_id)
         else:
-            place_teams[1] = final_match.team_away_id
-            place_teams[2] = final_match.team_home_id
-
+            place_teams[1] = await _team(final_match.team_away_id)
+            place_teams[2] = await _team(final_match.team_home_id)
     if third_match:
         if third_match.score_home >= third_match.score_away:
-            place_teams[3] = third_match.team_home_id
-            place_teams[4] = third_match.team_away_id
+            place_teams[3] = await _team(third_match.team_home_id)
+            place_teams[4] = await _team(third_match.team_away_id)
         else:
-            place_teams[3] = third_match.team_away_id
-            place_teams[4] = third_match.team_home_id
+            place_teams[3] = await _team(third_match.team_away_id)
+            place_teams[4] = await _team(third_match.team_home_id)
 
-    # ── Top scorer ──
-    goal_counts: Counter = Counter()
+    # ── Бомбардиры: player_id → {name, count} ──
+    scorer_stats: dict[int, dict] = {}
     for m in finished_matches:
         for g in m.goals:
-            if g.goal_type != GoalType.OWN_GOAL and g.player:
-                goal_counts[g.player.name] += 1
+            if g.goal_type == GoalType.OWN_GOAL or not g.player:
+                continue
+            pid = g.player_id
+            if pid not in scorer_stats:
+                scorer_stats[pid] = {"name": g.player.name, "count": 0}
+            scorer_stats[pid]["count"] += 1
 
-    # ── Best player from rating votes (last round for this game_day) ──
+    # ── Карточки: player_id → {name, yellow, red} ──
+    card_stats: dict[int, dict] = {}
+    for m in finished_matches:
+        for c in m.cards:
+            if not c.player:
+                continue
+            pid = c.player_id
+            if pid not in card_stats:
+                card_stats[pid] = {"name": c.player.name, "yellow": 0, "red": 0}
+            if c.card_type == CardType.YELLOW:
+                card_stats[pid]["yellow"] += 1
+            else:
+                card_stats[pid]["red"] += 1
+
+    # ── Вратари / сейвы ──
+    match_ids = [m.id for m in finished_matches]
+    gk_stats: dict[int, dict] = {}  # team_id → stats
+    if match_ids:
+        gk_res = await session.execute(
+            select(MatchGoalkeeper)
+            .options(
+                selectinload(MatchGoalkeeper.player),
+                selectinload(MatchGoalkeeper.team),
+                selectinload(MatchGoalkeeper.match),
+            )
+            .where(MatchGoalkeeper.match_id.in_(match_ids))
+        )
+        gk_records = gk_res.scalars().all()
+        for gk in gk_records:
+            if not gk.player or not gk.team:
+                continue
+            tid = gk.team_id
+            # Считаем пропущенные голы (голы в матче в ворота этой команды)
+            m = gk.match
+            if m:
+                conceded = m.score_away if gk.team_id == m.team_home_id else m.score_home
+            else:
+                conceded = 0
+            if tid not in gk_stats:
+                gk_stats[tid] = {
+                    "team_name": gk.team.name,
+                    "gk_name": gk.player.name,
+                    "saves": 0,
+                    "goals_conceded": 0,
+                    "clean_sheets": 0,
+                }
+            gk_stats[tid]["saves"] += gk.saves or 0
+            gk_stats[tid]["goals_conceded"] += conceded
+            if conceded == 0:
+                gk_stats[tid]["clean_sheets"] += 1
+
+    # ── Лучший игрок (рейтинговое голосование) ──
     best_player_name: str | None = None
     rating_res = await session.execute(
         select(RatingRound)
@@ -2577,50 +2637,287 @@ async def gd_tournament_results(call: CallbackQuery, session: AsyncSession, bot:
         if bp:
             best_player_name = bp.name
 
-    # ── Build admin result text (Russian) ──
-    place_keys = {1: 'place_1', 2: 'place_2', 3: 'place_3', 4: 'place_4'}
-    lines = [t('tournament_results_header', 'ru', game_name=game_day.display_name)]
+    total_goals = sum(d["count"] for d in scorer_stats.values())
+    # own goals too
+    for m in finished_matches:
+        for g in m.goals:
+            if g.goal_type == GoalType.OWN_GOAL:
+                total_goals += 1
 
-    if place_teams:
-        for place_num, key in place_keys.items():
-            team_id = place_teams.get(place_num)
-            if team_id:
-                team = await session.get(Team, team_id)
-                if team:
-                    lines.append(f"{t(key, 'ru')}: <b>{team.color_emoji} {team.name}</b>")
-    else:
-        lines.append("⚠️ Финал и матч за 3 место не найдены.")
-        lines.append("Назначь матчи с нужными стадиями в панели судьи.")
-
-    # Top scorer
-    if goal_counts:
-        top_name, top_cnt = goal_counts.most_common(1)[0]
-        lines.append(t('top_scorer', 'ru', name=top_name, count=top_cnt, goals_word=gw(top_cnt, 'ru')))
-
-    # Best player
-    if best_player_name:
-        lines.append(t('best_player', 'ru', name=best_player_name))
-
-    lines.append(t('tournament_thanks', 'ru'))
-
-    result_text = "\n".join(lines)
-
-    # Store place_teams for broadcast
-    # Broadcast to attendees
-    att_res = await session.execute(
-        select(Attendance)
-        .options(selectinload(Attendance.player))
-        .where(
-            Attendance.game_day_id == game_day_id,
-            Attendance.response == AttendanceResponse.YES,
-        )
+    return TournamentData(
+        game_day=game_day,
+        finished_matches=finished_matches,
+        place_teams=place_teams,
+        scorer_stats=scorer_stats,
+        card_stats=card_stats,
+        gk_stats=gk_stats,
+        best_player_name=best_player_name,
+        total_goals=total_goals,
+        total_matches=len(finished_matches),
     )
-    attendees = att_res.scalars().all()
+
+
+def _format_match_line(m, with_scorers: bool = True) -> list[str]:
+    """Форматирует одну строку матча + (опционально) авторов голов."""
+    from app.database.models import GoalType
+    lines = []
+    score = f"{m.score_home}:{m.score_away}"
+    lines.append(f"  {m.team_home.name} <b>{score}</b> {m.team_away.name}")
+    if with_scorers and m.goals:
+        home_scorers, away_scorers = [], []
+        for g in m.goals:
+            name = g.player.name if g.player else "?"
+            suffix = " (аг)" if g.goal_type == GoalType.OWN_GOAL else (
+                " (пен)" if g.goal_type == GoalType.PENALTY else ""
+            )
+            entry = f"{name}{suffix}"
+            # автогол идёт в ворота своей команды — у нас team_id = атакующая команда
+            if g.goal_type == GoalType.OWN_GOAL:
+                # scored by home player → goes to away's goal
+                if g.team_id == m.team_home_id:
+                    away_scorers.append(entry)
+                else:
+                    home_scorers.append(entry)
+            else:
+                if g.team_id == m.team_home_id:
+                    home_scorers.append(entry)
+                else:
+                    away_scorers.append(entry)
+        scorer_parts = []
+        if home_scorers:
+            scorer_parts.append(f"    ⚽ {m.team_home.name}: {', '.join(home_scorers)}")
+        if away_scorers:
+            scorer_parts.append(f"    ⚽ {m.team_away.name}: {', '.join(away_scorers)}")
+        lines.extend(scorer_parts)
+    return lines
+
+
+def _format_channel_post(data: TournamentData) -> str:
+    """Строит полноценный пост-итог для публикации в канале."""
+    gd = data.game_day
+    lines = [
+        f"🏆 <b>Итоги {gd.display_name}</b>",
+        f"📅 {gd.scheduled_at.strftime('%d.%m.%Y')} | 📍 {gd.location}",
+        "",
+    ]
+
+    # ── Матчи по стадиям ──
+    stage_order = ["group", "semifinal", "third_place", "final"]
+    stage_labels_ru = {
+        "group": "Групповой этап",
+        "semifinal": "Полуфинал",
+        "third_place": "Матч за 3-е место",
+        "final": "Финал",
+    }
+    grouped: dict[str, list] = {s: [] for s in stage_order}
+    for m in data.finished_matches:
+        stage = m.match_stage or "group"
+        if stage not in grouped:
+            grouped[stage] = []
+        grouped[stage].append(m)
+
+    for stage in stage_order:
+        matches_in_stage = grouped.get(stage, [])
+        if not matches_in_stage:
+            continue
+        lines.append(f"<b>{stage_labels_ru.get(stage, stage)}:</b>")
+        semi_n = 0
+        for m in matches_in_stage:
+            if stage == "semifinal":
+                semi_n += 1
+                lines.append(f"  Полуфинал {semi_n}:")
+                # indent scorer lines
+                for ml in _format_match_line(m, with_scorers=True):
+                    lines.append("  " + ml.strip())
+            else:
+                lines.extend(_format_match_line(m, with_scorers=True))
+        lines.append("")
+
+    # ── Места ──
+    place_icons = {1: "🥇", 2: "🥈", 3: "🥉", 4: "4️⃣"}
+    if data.place_teams:
+        lines.append("<b>Итоговые места:</b>")
+        for place_num in sorted(data.place_teams):
+            team = data.place_teams[place_num]
+            icon = place_icons.get(place_num, f"{place_num}.")
+            lines.append(f"  {icon} {team.color_emoji} <b>{team.name}</b>")
+        lines.append("")
+
+    # ── Топ-5 бомбардиров ──
+    if data.scorer_stats:
+        sorted_scorers = sorted(data.scorer_stats.values(), key=lambda x: x["count"], reverse=True)
+        lines.append("<b>⚽ Лучшие бомбардиры:</b>")
+        medals = ["🥇", "🥈", "🥉"]
+        for i, s in enumerate(sorted_scorers[:5]):
+            icon = medals[i] if i < 3 else f"{i + 1}."
+            lines.append(f"  {icon} {s['name']} — {s['count']} гол(ов)")
+        lines.append("")
+
+    # ── Лучший игрок ──
+    if data.best_player_name:
+        lines.append(f"⭐ <b>Лучший игрок:</b> {data.best_player_name}")
+        lines.append("")
+
+    # ── Вратари / сейвы ──
+    if data.gk_stats:
+        gk_lines = []
+        for tid, gk in data.gk_stats.items():
+            parts = [f"🧤 {gk['gk_name']} ({gk['team_name']})"]
+            if gk["saves"]:
+                parts.append(f"{gk['saves']} сейв(ов)")
+            if gk["clean_sheets"]:
+                parts.append(f"{gk['clean_sheets']} «сухих»")
+            gk_lines.append("  " + " — ".join(parts))
+        if gk_lines:
+            lines.append("<b>🧤 Вратари:</b>")
+            lines.extend(gk_lines)
+            lines.append("")
+
+    # ── Карточки ──
+    if data.card_stats:
+        card_lines = []
+        for pid, cs in data.card_stats.items():
+            parts = []
+            if cs["yellow"]:
+                parts.append(f"🟨×{cs['yellow']}")
+            if cs["red"]:
+                parts.append(f"🟥×{cs['red']}")
+            if parts:
+                card_lines.append(f"  {cs['name']}: {' '.join(parts)}")
+        if card_lines:
+            lines.append("<b>📋 Карточки:</b>")
+            lines.extend(card_lines)
+            lines.append("")
+
+    # ── Общая статистика ──
+    avg = data.total_goals / data.total_matches if data.total_matches else 0
+    lines.append(
+        f"📊 <i>Матчей: {data.total_matches} | Голов: {data.total_goals} | "
+        f"В среднем: {avg:.1f}/матч</i>"
+    )
+    lines.append("")
+    lines.append("🙏 Всем спасибо за игру! До встречи на следующем турнире!")
+
+    return "\n".join(lines)
+
+
+def _format_personal_results(
+    data: TournamentData,
+    player_id: int,
+    player_team_ids: set[int],
+    lang: str = "ru",
+) -> str:
+    """Персональное сообщение об итогах для одного игрока."""
+    gd = data.game_day
+    lines = [
+        f"🏆 <b>Итоги {gd.display_name}</b>",
+        f"📅 {gd.scheduled_at.strftime('%d.%m.%Y')}\n",
+    ]
+
+    # ── Личная статистика ──
+    personal_goals = data.scorer_stats.get(player_id, {}).get("count", 0)
+    personal_cards = data.card_stats.get(player_id, {})
+    personal_yellow = personal_cards.get("yellow", 0)
+    personal_red = personal_cards.get("red", 0)
+
+    personal_parts = []
+    if personal_goals:
+        personal_parts.append(f"⚽ {personal_goals} гол(ов)")
+    if personal_yellow:
+        personal_parts.append(f"🟨 {personal_yellow} ЖК")
+    if personal_red:
+        personal_parts.append(f"🟥 {personal_red} КК")
+
+    # Место команды
+    my_place_text = ""
+    for place_num, team in data.place_teams.items():
+        if team and team.id in player_team_ids:
+            place_icons = {1: "🥇", 2: "🥈", 3: "🥉", 4: "4️⃣"}
+            icon = place_icons.get(place_num, f"{place_num}.")
+            my_place_text = f"{icon} Твоя команда <b>{team.color_emoji} {team.name}</b> — место #{place_num}"
+            break
+
+    if my_place_text:
+        lines.append(my_place_text)
+    if personal_parts:
+        lines.append("👤 Твоя игра: " + " · ".join(personal_parts))
+    if my_place_text or personal_parts:
+        lines.append("")
+
+    # ── Результаты матчей ──
+    lines.append("<b>Результаты матчей:</b>")
+    stage_order = ["group", "semifinal", "third_place", "final"]
+    stage_labels_ru = {
+        "group": "Групповой этап",
+        "semifinal": "Полуфинал",
+        "third_place": "Матч за 3-е место",
+        "final": "Финал",
+    }
+    grouped: dict[str, list] = {s: [] for s in stage_order}
+    for m in data.finished_matches:
+        stage = m.match_stage or "group"
+        if stage not in grouped:
+            grouped[stage] = []
+        grouped[stage].append(m)
+
+    for stage in stage_order:
+        ms = grouped.get(stage, [])
+        if not ms:
+            continue
+        if stage != "group":
+            lines.append(f"<i>{stage_labels_ru.get(stage, stage)}</i>")
+        semi_n = 0
+        for m in ms:
+            lines.extend(_format_match_line(m, with_scorers=True))
+    lines.append("")
+
+    # ── Топ-3 бомбардира ──
+    if data.scorer_stats:
+        sorted_scorers = sorted(data.scorer_stats.values(), key=lambda x: x["count"], reverse=True)
+        medals = ["🥇", "🥈", "🥉"]
+        top3 = sorted_scorers[:3]
+        scorer_str = " · ".join(
+            f"{medals[i]} {s['name']} ({s['count']})"
+            for i, s in enumerate(top3)
+        )
+        lines.append(f"⚽ <b>Бомбардиры:</b> {scorer_str}")
+
+    if data.best_player_name:
+        lines.append(f"⭐ <b>Лучший игрок:</b> {data.best_player_name}")
+
+    lines.append("")
+    lines.append("🙏 Спасибо за игру! До встречи на следующем турнире!")
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════
+#  ИТОГИ ТУРНИРА — просмотр и рассылка
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("gd_tournament_results:"))
+async def gd_tournament_results(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    data = await _gather_tournament_data(session, game_day_id)
+    if not data:
+        await call.answer("⚠️ Нет завершённых матчей.", show_alert=True)
+        return
+
+    # Предпросмотр канального поста для админа (компактный)
+    result_text = _format_channel_post(data)
 
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(
         text="📢 Разослать итоги всем",
         callback_data=f"gd_results_broadcast:{game_day_id}"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="📋 Пост для канала",
+        callback_data=f"gd_to_channel:{game_day_id}"
     ))
     builder.row(InlineKeyboardButton(
         text="🔙 Назад",
@@ -2637,87 +2934,14 @@ async def gd_results_broadcast(call: CallbackQuery, session: AsyncSession, bot: 
         return
     await call.answer("📢 Рассылаю...")
 
-    from collections import Counter
-    from app.database.models import (
-        Match, MatchStatus, Goal, GoalType, Card, CardType,
-        Team, RatingRound, RatingVote,
-    )
-    from sqlalchemy.orm import selectinload
-
     game_day_id = int(call.data.split(":")[1])
-    game_day = await session.get(GameDay, game_day_id)
-    if not game_day:
+    data = await _gather_tournament_data(session, game_day_id)
+    if not data:
+        await call.answer("⚠️ Нет завершённых матчей.", show_alert=True)
         return
 
-    matches_res = await session.execute(
-        select(Match)
-        .options(
-            selectinload(Match.team_home),
-            selectinload(Match.team_away),
-            selectinload(Match.goals).selectinload(Goal.player),
-        )
-        .where(Match.game_day_id == game_day_id, Match.status == MatchStatus.FINISHED)
-    )
-    finished_matches = matches_res.scalars().all()
-
-    place_teams: dict[int, int] = {}
-    final_match = next(
-        (m for m in finished_matches if (m.match_stage or "group") == "final"), None
-    )
-    third_match = next(
-        (m for m in finished_matches if (m.match_stage or "group") == "third_place"), None
-    )
-    if final_match:
-        if final_match.score_home >= final_match.score_away:
-            place_teams[1] = final_match.team_home_id
-            place_teams[2] = final_match.team_away_id
-        else:
-            place_teams[1] = final_match.team_away_id
-            place_teams[2] = final_match.team_home_id
-    if third_match:
-        if third_match.score_home >= third_match.score_away:
-            place_teams[3] = third_match.team_home_id
-            place_teams[4] = third_match.team_away_id
-        else:
-            place_teams[3] = third_match.team_away_id
-            place_teams[4] = third_match.team_home_id
-
-    goal_counts: Counter = Counter()
-    for m in finished_matches:
-        for g in m.goals:
-            if g.goal_type != GoalType.OWN_GOAL and g.player:
-                goal_counts[g.player.name] += 1
-
-    best_player_name: str | None = None
-    rating_res = await session.execute(
-        select(RatingRound)
-        .options(selectinload(RatingRound.votes))
-        .where(
-            RatingRound.game_day_id == game_day_id,
-            RatingRound.status == "finished",
-        )
-        .order_by(RatingRound.id.desc())
-        .limit(1)
-    )
-    last_round = rating_res.scalar_one_or_none()
-    if last_round and last_round.votes:
-        from collections import Counter as _C
-        vote_totals: _C = _C()
-        for v in last_round.votes:
-            vote_totals[v.nominee_id] += v.score
-        best_id = vote_totals.most_common(1)[0][0]
-        bp = await session.get(Player, best_id)
-        if bp:
-            best_player_name = bp.name
-
-    # Build cached team names for places
-    place_team_objects: dict[int, Team] = {}
-    place_keys = {1: 'place_1', 2: 'place_2', 3: 'place_3', 4: 'place_4'}
-    for place_num, team_id in place_teams.items():
-        team_obj = await session.get(Team, team_id)
-        if team_obj:
-            place_team_objects[place_num] = team_obj
-
+    # Загружаем участников + их команды в этом игровом дне
+    from app.database.models import TeamPlayer
     att_res = await session.execute(
         select(Attendance)
         .options(selectinload(Attendance.player))
@@ -2728,27 +2952,25 @@ async def gd_results_broadcast(call: CallbackQuery, session: AsyncSession, bot: 
     )
     attendees = att_res.scalars().all()
 
+    # Строим карту player_id → set of team_ids (для этого игрового дня)
+    tp_res = await session.execute(
+        select(TeamPlayer)
+        .join(Team, TeamPlayer.team_id == Team.id)
+        .where(Team.game_day_id == game_day_id)
+    )
+    player_team_map: dict[int, set[int]] = {}
+    for tp in tp_res.scalars().all():
+        player_team_map.setdefault(tp.player_id, set()).add(tp.team_id)
+
     sent = 0
     for att in attendees:
+        if not att.player or not att.player.telegram_id:
+            continue
         try:
+            player_team_ids = player_team_map.get(att.player.id, set())
             lang = getattr(att.player, 'language', None) or 'ru'
-            lines = [t('tournament_results_header', lang, game_name=game_day.display_name)]
-
-            for place_num, key in place_keys.items():
-                team_obj = place_team_objects.get(place_num)
-                if team_obj:
-                    lines.append(f"{t(key, lang)}: <b>{team_obj.color_emoji} {team_obj.name}</b>")
-
-            if goal_counts:
-                top_name, top_cnt = goal_counts.most_common(1)[0]
-                lines.append(t('top_scorer', lang, name=top_name, count=top_cnt,
-                                goals_word=gw(top_cnt, lang)))
-            if best_player_name:
-                lines.append(t('best_player', lang, name=best_player_name))
-            lines.append(t('tournament_thanks', lang))
-
-            broadcast_text = "\n".join(lines)
-            await bot.send_message(att.player.telegram_id, broadcast_text)
+            msg = _format_personal_results(data, att.player.id, player_team_ids, lang)
+            await bot.send_message(att.player.telegram_id, msg)
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
@@ -2756,7 +2978,7 @@ async def gd_results_broadcast(call: CallbackQuery, session: AsyncSession, bot: 
 
     from app.keyboards.game_day import game_day_action_kb
     await call.message.answer(
-        f"✅ Итоги разосланы <b>{sent}</b> игрокам.",
+        t('results_broadcast_sent', 'ru', count=sent),
         reply_markup=game_day_action_kb(game_day_id)
     )
 
@@ -2767,70 +2989,21 @@ async def gd_results_broadcast(call: CallbackQuery, session: AsyncSession, bot: 
 
 @router.callback_query(F.data.startswith("gd_post_results:"))
 async def gd_post_results(call: CallbackQuery, session: AsyncSession, bot: Bot):
-    """Прямая рассылка итогов турнира всем участникам из action_kb."""
+    """Прямая рассылка персональных итогов турнира всем участникам из action_kb."""
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
         return
     await call.answer("📢 Рассылаю итоги...")
 
-    from collections import Counter
     from app.keyboards.game_day import game_day_action_kb
+    from app.database.models import TeamPlayer
 
     game_day_id = int(call.data.split(":")[1])
-    game_day = await session.get(GameDay, game_day_id)
-    if not game_day:
-        return
-
-    # Загружаем завершённые матчи
-    matches_res = await session.execute(
-        select(Match)
-        .options(
-            selectinload(Match.team_home),
-            selectinload(Match.team_away),
-            selectinload(Match.goals).selectinload(Goal.player),
-        )
-        .where(Match.game_day_id == game_day_id, Match.status == MatchStatus.FINISHED)
-    )
-    finished_matches = matches_res.scalars().all()
-
-    if not finished_matches:
+    data = await _gather_tournament_data(session, game_day_id)
+    if not data:
         await call.answer(t('results_broadcast_empty', 'ru'), show_alert=True)
         return
 
-    # Подсчёт мест
-    place_teams: dict[int, int] = {}
-    final_match = next((m for m in finished_matches if (m.match_stage or "group") == "final"), None)
-    third_match = next((m for m in finished_matches if (m.match_stage or "group") == "third_place"), None)
-    if final_match:
-        if final_match.score_home >= final_match.score_away:
-            place_teams[1], place_teams[2] = final_match.team_home_id, final_match.team_away_id
-        else:
-            place_teams[1], place_teams[2] = final_match.team_away_id, final_match.team_home_id
-    if third_match:
-        if third_match.score_home >= third_match.score_away:
-            place_teams[3], place_teams[4] = third_match.team_home_id, third_match.team_away_id
-        else:
-            place_teams[3], place_teams[4] = third_match.team_away_id, third_match.team_home_id
-
-    goal_counts: Counter = Counter()
-    for m in finished_matches:
-        for g in m.goals:
-            if g.goal_type != GoalType.OWN_GOAL and g.player:
-                goal_counts[g.player.name] += 1
-
-    place_keys = {1: 'place_1', 2: 'place_2', 3: 'place_3', 4: 'place_4'}
-    place_team_objects: dict[int, Team] = {}
-    for place_num, team_id in place_teams.items():
-        team_obj = await session.get(Team, team_id)
-        if team_obj:
-            place_team_objects[place_num] = team_obj
-
-    # Все матчи (для отображения результатов)
-    match_lines = []
-    for m in finished_matches:
-        match_lines.append(f"  ⚽ {m.team_home.name} {m.score_home}:{m.score_away} {m.team_away.name}")
-
-    # Рассылка участникам
     att_res = await session.execute(
         select(Attendance)
         .options(selectinload(Attendance.player))
@@ -2841,35 +3014,25 @@ async def gd_post_results(call: CallbackQuery, session: AsyncSession, bot: Bot):
     )
     attendees = att_res.scalars().all()
 
+    # Карта player_id → set of team_ids
+    tp_res = await session.execute(
+        select(TeamPlayer)
+        .join(Team, TeamPlayer.team_id == Team.id)
+        .where(Team.game_day_id == game_day_id)
+    )
+    player_team_map: dict[int, set[int]] = {}
+    for tp in tp_res.scalars().all():
+        player_team_map.setdefault(tp.player_id, set()).add(tp.team_id)
+
     sent = 0
     for att in attendees:
-        if not att.player:
+        if not att.player or not att.player.telegram_id:
             continue
         try:
+            player_team_ids = player_team_map.get(att.player.id, set())
             lang = getattr(att.player, 'language', None) or 'ru'
-            lines = [t('tournament_results_header', lang, game_name=game_day.display_name)]
-            lines.append(f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y')}\n")
-
-            # Все результаты матчей
-            if match_lines:
-                lines.append("<b>Результаты матчей:</b>")
-                lines.extend(match_lines)
-                lines.append("")
-
-            # Места
-            for place_num, key in place_keys.items():
-                team_obj = place_team_objects.get(place_num)
-                if team_obj:
-                    lines.append(f"{t(key, lang)}: <b>{team_obj.color_emoji} {team_obj.name}</b>")
-
-            # Топ бомбардир
-            if goal_counts:
-                top_name, top_cnt = goal_counts.most_common(1)[0]
-                lines.append(t('top_scorer', lang, name=top_name, count=top_cnt,
-                                goals_word=gw(top_cnt, lang)))
-            lines.append(t('tournament_thanks', lang))
-
-            await bot.send_message(att.player.telegram_id, "\n".join(lines))
+            msg = _format_personal_results(data, att.player.id, player_team_ids, lang)
+            await bot.send_message(att.player.telegram_id, msg)
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
@@ -2893,90 +3056,13 @@ async def gd_to_channel(call: CallbackQuery, session: AsyncSession):
         return
     await call.answer()
 
-    from collections import Counter
-    from app.keyboards.game_day import game_day_action_kb
-
     game_day_id = int(call.data.split(":")[1])
-    game_day = await session.get(GameDay, game_day_id)
-    if not game_day:
-        return
-
-    matches_res = await session.execute(
-        select(Match)
-        .options(
-            selectinload(Match.team_home),
-            selectinload(Match.team_away),
-            selectinload(Match.goals).selectinload(Goal.player),
-        )
-        .where(Match.game_day_id == game_day_id, Match.status == MatchStatus.FINISHED)
-    )
-    finished_matches = matches_res.scalars().all()
-
-    if not finished_matches:
+    data = await _gather_tournament_data(session, game_day_id)
+    if not data:
         await call.answer("⚠️ Нет завершённых матчей.", show_alert=True)
         return
 
-    # Определяем места по финалу
-    place_teams: dict[int, int] = {}
-    final_match = next((m for m in finished_matches if (m.match_stage or "group") == "final"), None)
-    third_match = next((m for m in finished_matches if (m.match_stage or "group") == "third_place"), None)
-    if final_match:
-        if final_match.score_home >= final_match.score_away:
-            place_teams[1], place_teams[2] = final_match.team_home_id, final_match.team_away_id
-        else:
-            place_teams[1], place_teams[2] = final_match.team_away_id, final_match.team_home_id
-    if third_match:
-        if third_match.score_home >= third_match.score_away:
-            place_teams[3], place_teams[4] = third_match.team_home_id, third_match.team_away_id
-        else:
-            place_teams[3], place_teams[4] = third_match.team_away_id, third_match.team_home_id
-
-    goal_counts: Counter = Counter()
-    for m in finished_matches:
-        for g in m.goals:
-            if g.goal_type != GoalType.OWN_GOAL and g.player:
-                goal_counts[g.player.name] += 1
-
-    lines = [f"🏆 <b>Итоги {game_day.display_name}</b>"]
-    lines.append(f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y')} | 📍 {game_day.location}\n")
-
-    # Групповые матчи
-    group_matches = [m for m in finished_matches if (m.match_stage or "group") == "group"]
-    if group_matches:
-        lines.append("<b>Групповой этап:</b>")
-        for m in group_matches:
-            lines.append(f"  {m.team_home.name} {m.score_home}:{m.score_away} {m.team_away.name}")
-
-    # Плей-офф матчи
-    playoff = [m for m in finished_matches if (m.match_stage or "group") != "group"]
-    if playoff:
-        lines.append("\n<b>Плей-офф:</b>")
-        stage_labels = {"semifinal": "Полуфинал", "third_place": "Матч за 3-е", "final": "Финал"}
-        semi_n = 0
-        for m in playoff:
-            stage = m.match_stage or "group"
-            if stage == "semifinal":
-                semi_n += 1
-                label = f"Полуфинал {semi_n}"
-            else:
-                label = stage_labels.get(stage, stage)
-            lines.append(f"  {label}: {m.team_home.name} {m.score_home}:{m.score_away} {m.team_away.name}")
-
-    lines.append("")
-    place_keys = {1: 'place_1', 2: 'place_2', 3: 'place_3', 4: 'place_4'}
-    for place_num, team_id in place_teams.items():
-        team_obj = await session.get(Team, team_id)
-        if team_obj:
-            lines.append(f"{t(place_keys[place_num], 'ru')}: <b>{team_obj.color_emoji} {team_obj.name}</b>")
-
-    if goal_counts:
-        top_name, top_cnt = goal_counts.most_common(1)[0]
-        lines.append(t('top_scorer', 'ru', name=top_name, count=top_cnt, goals_word=gw(top_cnt, 'ru')))
-
-    lines.append(t('tournament_thanks', 'ru'))
-
-    post_text = "\n".join(lines)
-    # Отправляем как превью в текущий чат
+    post_text = _format_channel_post(data)
     await call.message.answer(
         "📋 <b>Готовый пост (скопируй и опубликуй в канале):</b>\n\n" + post_text,
         reply_markup=InlineKeyboardBuilder().row(
