@@ -774,6 +774,7 @@ const state = {
   listRefreshTimer: null,
   selectedStage: 'group',
   refreshTimer: null,
+  penaltyActive: false,  // true during penalty shootout — blocks auto-refresh
 };
 
 // ── URL params ────────────────────────────────
@@ -945,12 +946,17 @@ function startAutoRefresh() {
   stopAutoRefresh();
   state.refreshTimer = setInterval(async () => {
     if (!state.matchId) return;
+    // Never auto-refresh during an active penalty shootout
+    if (state.penaltyActive) return;
     const data = await apiFetch('/api/referee/match/' + state.matchId);
     if (!data) return;
+    // Stop immediately if match is no longer in progress, before re-rendering
+    if (data.status !== 'in_progress') {
+      stopAutoRefresh();
+      return;  // don't disrupt the UI — user will see finish via finishMatch()
+    }
     state.matchData = data;
-    // Only re-render match content (not full page)
     renderMatchContent(data);
-    if (data.status !== 'in_progress') stopAutoRefresh();
   }, 10000);
 }
 
@@ -1572,7 +1578,11 @@ async function createMatch() {
 // ─────────────────────────────────────────────
 async function startPenalty() {
   const res = await apiFetch('/api/referee/match/' + state.matchId + '/penalty/start', { method: 'POST' });
-  if (res && res.ok) await refreshMatch();
+  if (res && res.ok) {
+    state.penaltyActive = true;  // block auto-refresh during penalty
+    stopAutoRefresh();
+    await refreshMatch();
+  }
 }
 
 async function penaltyKick(side, scored) {
@@ -1580,7 +1590,18 @@ async function penaltyKick(side, scored) {
     method: 'POST',
     body: JSON.stringify({ side, scored }),
   });
-  if (res && res.ok) await refreshMatch();
+  if (res && res.ok) {
+    // Update only penalty score digits — don't re-render the whole panel
+    if (res.score_home !== undefined) {
+      const el = document.querySelector('.penalty-digits');
+      if (el) el.textContent = res.score_home + ' : ' + res.score_away;
+      // Keep state in sync
+      if (state.matchData && state.matchData.penalty) {
+        state.matchData.penalty.score_home = res.score_home;
+        state.matchData.penalty.score_away = res.score_away;
+      }
+    }
+  }
 }
 
 async function penaltyFinish(winner) {
@@ -1590,7 +1611,10 @@ async function penaltyFinish(winner) {
       method: 'POST',
       body: JSON.stringify({ winner }),
     });
-    if (res && res.ok) await refreshMatch();
+    if (res && res.ok) {
+      state.penaltyActive = false;
+      await refreshMatch();
+    }
   });
 }
 
