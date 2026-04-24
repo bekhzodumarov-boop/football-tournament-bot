@@ -2510,6 +2510,8 @@ class TournamentData:
     card_stats: dict
     # team_id → {"team_name": str, "gk_name": str, "saves": int, "goals_conceded": int}
     gk_stats: dict
+    # team_id → list of player names
+    team_rosters: dict
     best_player_name: str | None
     total_goals: int
     total_matches: int
@@ -2658,6 +2660,20 @@ async def _gather_tournament_data(session, game_day_id: int) -> TournamentData |
             if g.goal_type == GoalType.OWN_GOAL:
                 total_goals += 1
 
+    # ── Составы команд для итоговых мест ──
+    team_rosters: dict[int, list[str]] = {}
+    all_place_team_ids = {t.id for t in place_teams.values() if t}
+    if all_place_team_ids:
+        from sqlalchemy.orm import selectinload as _sl
+        tp_res = await session.execute(
+            select(TeamPlayer)
+            .options(_sl(TeamPlayer.player))
+            .where(TeamPlayer.team_id.in_(all_place_team_ids))
+        )
+        for tp in tp_res.scalars().all():
+            if tp.player:
+                team_rosters.setdefault(tp.team_id, []).append(tp.player.name)
+
     return TournamentData(
         game_day=game_day,
         finished_matches=finished_matches,
@@ -2665,6 +2681,7 @@ async def _gather_tournament_data(session, game_day_id: int) -> TournamentData |
         scorer_stats=scorer_stats,
         card_stats=card_stats,
         gk_stats=gk_stats,
+        team_rosters=team_rosters,
         best_player_name=best_player_name,
         total_goals=total_goals,
         total_matches=len(finished_matches),
@@ -2764,6 +2781,9 @@ def _format_channel_post(data: TournamentData) -> str:
             team = data.place_teams[place_num]
             icon = place_icons.get(place_num, f"{place_num}.")
             lines.append(f"  {icon} {team.color_emoji} <b>{team.name}</b>")
+            roster = data.team_rosters.get(team.id, [])
+            if roster:
+                lines.append(f"    👥 {', '.join(roster)}")
         lines.append("")
 
     # ── Топ-5 бомбардиров ──

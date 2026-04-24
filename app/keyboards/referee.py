@@ -55,6 +55,10 @@ def referee_gd_kb(game_day_id: int, matches: list) -> InlineKeyboardMarkup:
             callback_data=f"ref_standings:{game_day_id}"
         ),
     )
+    builder.row(InlineKeyboardButton(
+        text="🔄 Замена не пришедшего",
+        callback_data=f"ref_absent:{game_day_id}"
+    ))
     return builder.as_markup()
 
 

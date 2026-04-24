@@ -1313,6 +1313,98 @@ async def ref_finish_confirm(call: CallbackQuery, session: AsyncSession,
     )
 
 
+async def _advance_playoff(session, match: Match, bot: Bot) -> str | None:
+    """
+    После завершения полуфинала — если оба полуфинала завершены,
+    автоматически создать матчи Финал и Матч за 3-е место.
+    Возвращает текст уведомления или None.
+    """
+    if (match.match_stage or "group") != "semifinal":
+        return None
+
+    # Все завершённые полуфиналы этого игрового дня
+    res = await session.execute(
+        select(Match)
+        .options(
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+        )
+        .where(
+            Match.game_day_id == match.game_day_id,
+            Match.match_stage == "semifinal",
+            Match.status == MatchStatus.FINISHED,
+        )
+        .order_by(Match.id)
+    )
+    finished_semis = res.scalars().all()
+    if len(finished_semis) < 2:
+        return None  # Ждём второго полуфинала
+
+    # Проверить: финал и матч за 3-е уже созданы?
+    existing_res = await session.execute(
+        select(Match).where(
+            Match.game_day_id == match.game_day_id,
+            Match.match_stage.in_(["final", "third_place"]),
+        )
+    )
+    existing_stages = {m.match_stage for m in existing_res.scalars().all()}
+    if "final" in existing_stages and "third_place" in existing_stages:
+        return None  # Уже созданы
+
+    # Определяем победителей и проигравших
+    def winner_loser(m: Match):
+        if m.score_home > m.score_away:
+            return m.team_home_id, m.team_away_id
+        elif m.score_away > m.score_home:
+            return m.team_away_id, m.team_home_id
+        else:
+            # Ничья в полуфинале — победитель по серии пенальти, если есть
+            from app.database.models import PenaltyShootout
+            return m.team_home_id, m.team_away_id  # fallback
+
+    w1, l1 = winner_loser(finished_semis[0])
+    w2, l2 = winner_loser(finished_semis[1])
+
+    # Параметры матча берём из первого полуфинала
+    semi = finished_semis[0]
+    created = []
+
+    if "final" not in existing_stages:
+        final = Match(
+            game_day_id=match.game_day_id,
+            team_home_id=w1,
+            team_away_id=w2,
+            match_stage="final",
+            match_format=semi.match_format,
+            duration_min=semi.duration_min,
+            goals_to_win=semi.goals_to_win,
+            status=MatchStatus.SCHEDULED,
+            match_order=0,
+        )
+        session.add(final)
+        created.append("🏆 Финал")
+
+    if "third_place" not in existing_stages:
+        third = Match(
+            game_day_id=match.game_day_id,
+            team_home_id=l1,
+            team_away_id=l2,
+            match_stage="third_place",
+            match_format=semi.match_format,
+            duration_min=semi.duration_min,
+            goals_to_win=semi.goals_to_win,
+            status=MatchStatus.SCHEDULED,
+            match_order=0,
+        )
+        session.add(third)
+        created.append("🥉 Матч за 3-е место")
+
+    if created:
+        await session.commit()
+        return "✅ Автоматически созданы: " + ", ".join(created)
+    return None
+
+
 @router.callback_query(F.data.startswith("ref_finish_ok:"))
 async def ref_finish_match(call: CallbackQuery, session: AsyncSession,
                            player: Player | None, bot: Bot):
@@ -1373,6 +1465,11 @@ async def ref_finish_match(call: CallbackQuery, session: AsyncSession,
 
     # Уведомить о следующем матче по расписанию
     await _notify_next_match(bot, session, match)
+
+    # Авто-продвижение плей-офф (создать финал/3-е место после обоих полуфиналов)
+    playoff_msg = await _advance_playoff(session, match, bot)
+    if playoff_msg:
+        await call.message.answer(playoff_msg)
 
 
 # ─────────────────────────────────────────────
@@ -1833,6 +1930,170 @@ async def ref_pick_team2(call: CallbackQuery, state: FSMContext,
 
 
 # ─────────────────────────────────────────────
+#  T-023: Замена не пришедшего игрока
+# ─────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("ref_absent:"))
+async def ref_absent_start(call: CallbackQuery, session: AsyncSession,
+                           player: Player | None):
+    """Шаг 1: выбрать отсутствующего игрока из состава команд."""
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+
+    # Все TeamPlayer для этого игрового дня
+    teams_res = await session.execute(
+        select(Team)
+        .options(
+            selectinload(Team.players).selectinload(TeamPlayer.player)
+        )
+        .where(Team.game_day_id == game_day_id)
+    )
+    teams = teams_res.scalars().all()
+
+    if not teams:
+        await call.answer("⚠️ Команды ещё не сформированы.", show_alert=True)
+        return
+
+    builder = InlineKeyboardBuilder()
+    for team in teams:
+        for tp in team.players:
+            if not tp.player:
+                continue
+            builder.button(
+                text=f"{team.color_emoji} {tp.player.name}",
+                callback_data=f"ref_absent_pick:{game_day_id}:{tp.player_id}:{team.id}"
+            )
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data=f"ref_gd:{game_day_id}"
+    ))
+
+    await call.message.edit_text(
+        "👤 <b>Кто не пришёл?</b>\n\nВыбери игрока из состава команд:",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("ref_absent_pick:"))
+async def ref_absent_pick_replacement(call: CallbackQuery, session: AsyncSession,
+                                      player: Player | None):
+    """Шаг 2: выбрать замену из пришедших участников, не состоящих в команде."""
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    parts = call.data.split(":")
+    game_day_id = int(parts[1])
+    absent_player_id = int(parts[2])
+    team_id = int(parts[3])
+
+    absent_player = await session.get(Player, absent_player_id)
+
+    # Все игроки уже в командах
+    tp_res = await session.execute(
+        select(TeamPlayer.player_id)
+        .join(Team, TeamPlayer.team_id == Team.id)
+        .where(Team.game_day_id == game_day_id)
+    )
+    already_in_team = {row[0] for row in tp_res.all()}
+
+    # Пришедшие участники (YES), не в командах, не сам отсутствующий
+    att_res = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.response == AttendanceResponse.YES,
+            Attendance.player_id.notin_(already_in_team),
+            Attendance.player_id != absent_player_id,
+        )
+    )
+    candidates = [a.player for a in att_res.scalars().all() if a.player]
+
+    if not candidates:
+        await call.answer("⚠️ Нет свободных игроков для замены.", show_alert=True)
+        return
+
+    builder = InlineKeyboardBuilder()
+    for p in candidates:
+        builder.button(
+            text=p.name,
+            callback_data=f"ref_absent_confirm:{game_day_id}:{absent_player_id}:{team_id}:{p.id}"
+        )
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data=f"ref_absent:{game_day_id}"
+    ))
+
+    absent_name = absent_player.name if absent_player else "?"
+    team_obj = await session.get(Team, team_id)
+    team_name = f"{team_obj.color_emoji} {team_obj.name}" if team_obj else "?"
+
+    await call.message.edit_text(
+        f"🔄 <b>Замена для {absent_name}</b> ({team_name})\n\n"
+        "Выбери игрока, который войдёт в состав вместо него:",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("ref_absent_confirm:"))
+async def ref_absent_execute(call: CallbackQuery, session: AsyncSession,
+                             player: Player | None):
+    """Шаг 3: выполнить замену — убрать отсутствующего, добавить замену."""
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    game_day_id = int(parts[1])
+    absent_player_id = int(parts[2])
+    team_id = int(parts[3])
+    replacement_id = int(parts[4])
+
+    # Найти и удалить отсутствующего из TeamPlayer
+    tp_res = await session.execute(
+        select(TeamPlayer).where(
+            TeamPlayer.team_id == team_id,
+            TeamPlayer.player_id == absent_player_id,
+        )
+    )
+    tp_to_remove = tp_res.scalar_one_or_none()
+    if tp_to_remove:
+        await session.delete(tp_to_remove)
+
+    # Добавить замену
+    session.add(TeamPlayer(team_id=team_id, player_id=replacement_id))
+    await session.commit()
+
+    absent = await session.get(Player, absent_player_id)
+    replacement = await session.get(Player, replacement_id)
+    team_obj = await session.get(Team, team_id)
+
+    absent_name = absent.name if absent else "?"
+    replacement_name = replacement.name if replacement else "?"
+    team_name = f"{team_obj.color_emoji} {team_obj.name}" if team_obj else "?"
+
+    await call.answer(f"✅ {absent_name} → {replacement_name}", show_alert=True)
+    await call.message.edit_text(
+        f"✅ <b>Замена выполнена</b>\n\n"
+        f"Команда: {team_name}\n"
+        f"❌ Вышел: {absent_name}\n"
+        f"✅ Вошёл: {replacement_name}\n\n"
+        "<i>Голы и карточки замены будут учитываться в его личной статистике.</i>",
+        reply_markup=InlineKeyboardBuilder().row(
+            InlineKeyboardButton(text="🔙 К игровому дню", callback_data=f"ref_gd:{game_day_id}")
+        ).as_markup()
+    )
+
+
+# ─────────────────────────────────────────────
 #  Составы команд — предварительная настройка
 # ─────────────────────────────────────────────
 
@@ -2048,6 +2309,10 @@ async def ref_standings(call: CallbackQuery, player: Player | None,
     from aiogram.types import InlineKeyboardButton
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(
+        text="🖼 Картинка таблицы",
+        callback_data=f"ref_standings_img:{game_day_id}"
+    ))
+    builder.row(InlineKeyboardButton(
         text="🔙 К игровому дню",
         callback_data=f"ref_gd:{game_day_id}"
     ))
@@ -2117,6 +2382,83 @@ async def ref_standings(call: CallbackQuery, player: Player | None,
             lines.append(f"  {i}. {name} — {cnt} {suffix}")
 
     await call.message.edit_text("\n".join(lines), reply_markup=builder.as_markup())
+
+
+# ─────────────────────────────────────────────
+#  Картинка таблицы (T-016)
+# ─────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("ref_standings_img:"))
+async def ref_standings_image(call: CallbackQuery, player: Player | None,
+                              session: AsyncSession):
+    if not _is_referee(call.from_user.id, player):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("🖼 Генерирую картинку...")
+
+    from collections import Counter
+    from aiogram.types import BufferedInputFile
+    from app.utils.standings_image import generate_standings_image
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        return
+
+    standings = await _compute_standings(session, game_day_id)
+
+    all_matches_res = await session.execute(
+        select(Match)
+        .options(
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        )
+        .where(Match.game_day_id == game_day_id)
+        .order_by(Match.id)
+    )
+    all_matches = all_matches_res.scalars().all()
+
+    playoff_stage_order = ["semifinal", "third_place", "final"]
+    playoff_matches = []
+    for m in all_matches:
+        stage = m.match_stage or "group"
+        if stage in playoff_stage_order:
+            playoff_matches.append({
+                "stage": stage,
+                "home": m.team_home.name[:12],
+                "away": m.team_away.name[:12],
+                "score_h": m.score_home,
+                "score_a": m.score_away,
+                "finished": m.status == MatchStatus.FINISHED,
+            })
+    playoff_matches.sort(key=lambda x: playoff_stage_order.index(x["stage"]))
+
+    goal_counts: Counter = Counter()
+    for m in all_matches:
+        for g in m.goals:
+            if g.goal_type != GoalType.OWN_GOAL and g.player:
+                goal_counts[g.player.name] += 1
+    top_scorers = goal_counts.most_common(5)
+
+    date_str = game_day.scheduled_at.strftime("%d.%m.%Y")
+
+    import asyncio
+    loop = asyncio.get_event_loop()
+    img_bytes = await loop.run_in_executor(
+        None,
+        generate_standings_image,
+        game_day.display_name,
+        date_str,
+        standings,
+        playoff_matches,
+        top_scorers,
+    )
+
+    await call.message.answer_photo(
+        BufferedInputFile(img_bytes, filename="standings.png"),
+        caption=f"📊 {game_day.display_name} — {date_str}"
+    )
 
 
 # ─────────────────────────────────────────────

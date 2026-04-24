@@ -1,7 +1,8 @@
 """
 Автоматические напоминания об игре.
-  - за 24 часа: всем записавшимся (YES)
-  - за 2 часа:  всем записавшимся (YES) + не ответившим (NO_RESPONSE)
+  - за 9 часов:  всем записавшимся (YES) — «сегодня игра»
+  - за 2 часа:   подтвердившим (confirmed_final=True) — простое «через 2ч»
+                 неподтвердившим (confirmed_final=False) — «через 2ч + подтверди»
   - накануне в 20:00: напоминание с кнопками подтверждения (YES)
   - в день игры в 12:00: напоминание с кнопками подтверждения (YES)
 """
@@ -35,56 +36,62 @@ async def _send_reminder(game_day_id: int, hours_before: int) -> None:
         if not game_day or game_day.status == GameDayStatus.CANCELLED:
             return
 
-        # Кого уведомлять: YES всегда; NO_RESPONSE только за 2ч
-        target_responses = [AttendanceResponse.YES]
-        if hours_before <= 2:
-            target_responses.append(AttendanceResponse.NO_RESPONSE)
+        date_str = game_day.scheduled_at.strftime("%d.%m.%Y")
+        time_str = game_day.scheduled_at.strftime("%H:%M")
 
         result = await session.execute(
             select(Attendance)
             .options(selectinload(Attendance.player))
             .where(
                 Attendance.game_day_id == game_day_id,
-                Attendance.response.in_(target_responses),
+                Attendance.response == AttendanceResponse.YES,
             )
         )
         attendances = result.scalars().all()
 
-        date_str = game_day.scheduled_at.strftime("%d.%m.%Y")
-        time_str = game_day.scheduled_at.strftime("%H:%M")
-
-        if hours_before >= 24:
+        if hours_before >= 9:
+            # За 9ч — простое напоминание всем записавшимся
             text = (
-                f"⏰ <b>Напоминание — завтра игра!</b>\n\n"
-                f"📅 {date_str} в {time_str}\n"
-                f"📍 {game_day.location}\n"
+                f"⏰ <b>Сегодня игра!</b>\n\n"
+                f"🕐 {time_str}  📍 {game_day.location}\n"
                 f"💰 Взнос: {game_day.cost_per_player} сум.\n\n"
-                "Ты записан. Не забудь прийти! ⚽"
+                "Ты записан. До встречи на поле! ⚽"
             )
-        else:
-            text = (
-                f"🔔 <b>Через 2 часа игра!</b>\n\n"
-                f"🕐 {time_str}, 📍 {game_day.location}\n\n"
-                "Не опаздывай! ⚽"
-            )
-
-        sent = 0
-        for att in attendances:
-            try:
-                if att.response == AttendanceResponse.NO_RESPONSE:
-                    # Незаписавшимся показать кнопку записи
-                    await _bot.send_message(
-                        att.player.telegram_id,
-                        f"⏰ <b>Через 2 часа игра!</b>\n\n"
-                        f"📅 {date_str} в {time_str}, {game_day.location}\n\n"
-                        "Ты ещё не подтвердил участие. Идёшь?",
-                        reply_markup=join_game_kb(game_day.id, game_day.is_open),
-                    )
-                else:
+            for att in attendances:
+                try:
                     await _bot.send_message(att.player.telegram_id, text)
-                sent += 1
-            except Exception:
-                pass
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    pass
+        else:
+            # За 2ч — разные сообщения в зависимости от подтверждения
+            for att in attendances:
+                try:
+                    if att.confirmed_final:
+                        # Уже подтвердил — просто напоминание
+                        msg = (
+                            f"🔔 <b>Через 2 часа игра!</b>\n\n"
+                            f"🕐 {time_str}  📍 {game_day.location}\n\n"
+                            "Не опаздывай! ⚽"
+                        )
+                        await _bot.send_message(att.player.telegram_id, msg)
+                    else:
+                        # Не подтвердил — напоминание + просьба подтвердить
+                        lang = getattr(att.player, 'language', None) or 'ru'
+                        msg = (
+                            f"🔔 <b>Через 2 часа игра!</b>\n\n"
+                            f"🕐 {time_str}  📍 {game_day.location}\n\n"
+                            "Ты ещё не подтвердил участие.\n"
+                            "Пожалуйста, подтверди — придёшь?"
+                        )
+                        await _bot.send_message(
+                            att.player.telegram_id,
+                            msg,
+                            reply_markup=confirm_attendance_kb(game_day_id, lang),
+                        )
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    pass
 
 
 async def _send_confirm_reminder(game_day_id: int, reminder_type: str) -> None:
@@ -172,22 +179,23 @@ async def _send_confirm_reminder(game_day_id: int, reminder_type: str) -> None:
 
 
 def schedule_reminders(game_day: GameDay) -> None:
-    """Запланировать напоминания за 24ч, 2ч, накануне 20:00 и в день игры 12:00."""
+    """Запланировать напоминания за 9ч, 2ч, накануне 20:00 и в день игры 12:00."""
     now = datetime.now()
     gd_id = game_day.id
     game_dt = game_day.scheduled_at  # naive Tashkent local time
 
-    # --- старые напоминания: за 24ч и 2ч (без кнопок подтверждения) ---
-    reminder_24h = game_dt - timedelta(hours=24)
+    # --- напоминание за 9ч: всем записавшимся ---
+    reminder_9h = game_dt - timedelta(hours=9)
+    # --- напоминание за 2ч: с проверкой подтверждения ---
     reminder_2h = game_dt - timedelta(hours=2)
 
-    if reminder_24h > now:
+    if reminder_9h > now:
         scheduler.add_job(
             _send_reminder,
             trigger="date",
-            run_date=reminder_24h,
-            args=[gd_id, 24],
-            id=f"reminder_{gd_id}_24h",
+            run_date=reminder_9h,
+            args=[gd_id, 9],
+            id=f"reminder_{gd_id}_9h",
             replace_existing=True,
         )
 
