@@ -34,7 +34,7 @@ from app.database.models import (
     Team, TeamPlayer, Match, MatchStatus, MatchFormat,
     Goal, GoalType,
     Card, CardType,
-    Player,
+    Player, PlayerStatus,
     MatchStage, MATCH_STAGE_LABELS,
     MatchGoalkeeper,
     PenaltyShootout,
@@ -264,7 +264,7 @@ async def _auto_finish_match(match_id: int, timer_data: dict) -> None:
         logger.error(f"Auto-finish match {match_id} error: {e}")
 
 
-def _match_panel_text(match: Match) -> str:
+def _match_panel_text(match: Match, home_players: list = None, away_players: list = None) -> str:
     home = match.team_home.name
     away = match.team_away.name
 
@@ -278,6 +278,16 @@ def _match_panel_text(match: Match) -> str:
     else:
         timer_line = "⏱ Таймер не запущен"
 
+    text = f"⚽ <b>{home}  {match.score_home} : {match.score_away}  {away}</b>\n{timer_line}\n"
+
+    # Составы команд (показываем всегда для удобства проверки)
+    if home_players or away_players:
+        text += "\n<b>Составы:</b>\n"
+        if home_players:
+            text += f"  {match.team_home.name}: {', '.join(home_players)}\n"
+        if away_players:
+            text += f"  {match.team_away.name}: {', '.join(away_players)}\n"
+
     goals_lines = [
         f"  🥅 {g.player.name}"
         + (" (авт.)" if g.goal_type == GoalType.OWN_GOAL else "")
@@ -290,7 +300,6 @@ def _match_panel_text(match: Match) -> str:
         for c in sorted(match.cards, key=lambda x: x.issued_at)
     ]
 
-    text = f"⚽ <b>{home}  {match.score_home} : {match.score_away}  {away}</b>\n{timer_line}\n"
     if goals_lines:
         text += "\n<b>Голы:</b>\n" + "\n".join(goals_lines) + "\n"
     if card_lines:
@@ -865,8 +874,22 @@ async def ref_match_panel(call: CallbackQuery, session: AsyncSession,
     home_gk = gk_data.get(f"gk_{match.team_home_id}", "")
     away_gk = gk_data.get(f"gk_{match.team_away_id}", "")
 
+    # Загружаем составы команд
+    tp_res = await session.execute(
+        select(TeamPlayer)
+        .options(selectinload(TeamPlayer.player))
+        .where(TeamPlayer.team_id.in_([match.team_home_id, match.team_away_id]))
+    )
+    home_players, away_players = [], []
+    for tp in tp_res.scalars().all():
+        if tp.player:
+            if tp.team_id == match.team_home_id:
+                home_players.append(tp.player.name)
+            else:
+                away_players.append(tp.player.name)
+
     await call.message.edit_text(
-        _match_panel_text(match),
+        _match_panel_text(match, home_players=home_players, away_players=away_players),
         reply_markup=referee_match_kb(
             match_id,
             is_started=match.status == MatchStatus.IN_PROGRESS,
@@ -1369,21 +1392,7 @@ async def _advance_playoff(session, match: Match, bot: Bot) -> str | None:
     semi = finished_semis[0]
     created = []
 
-    if "final" not in existing_stages:
-        final = Match(
-            game_day_id=match.game_day_id,
-            team_home_id=w1,
-            team_away_id=w2,
-            match_stage="final",
-            match_format=semi.match_format,
-            duration_min=semi.duration_min,
-            goals_to_win=semi.goals_to_win,
-            status=MatchStatus.SCHEDULED,
-            match_order=0,
-        )
-        session.add(final)
-        created.append("🏆 Финал")
-
+    # Сначала создаём матч за 3-е место, потом финал (такой порядок в сетке)
     if "third_place" not in existing_stages:
         third = Match(
             game_day_id=match.game_day_id,
@@ -1398,6 +1407,21 @@ async def _advance_playoff(session, match: Match, bot: Bot) -> str | None:
         )
         session.add(third)
         created.append("🥉 Матч за 3-е место")
+
+    if "final" not in existing_stages:
+        final = Match(
+            game_day_id=match.game_day_id,
+            team_home_id=w1,
+            team_away_id=w2,
+            match_stage="final",
+            match_format=semi.match_format,
+            duration_min=semi.duration_min,
+            goals_to_win=semi.goals_to_win,
+            status=MatchStatus.SCHEDULED,
+            match_order=0,
+        )
+        session.add(final)
+        created.append("🏆 Финал")
 
     if created:
         await session.commit()
@@ -1982,7 +2006,7 @@ async def ref_absent_start(call: CallbackQuery, session: AsyncSession,
 @router.callback_query(F.data.startswith("ref_absent_pick:"))
 async def ref_absent_pick_replacement(call: CallbackQuery, session: AsyncSession,
                                       player: Player | None):
-    """Шаг 2: выбрать замену из пришедших участников, не состоящих в команде."""
+    """Шаг 2: выбрать замену — из любой команды или из всех зарегистрированных в боте."""
     if not _is_referee(call.from_user.id, player):
         await call.answer("⛔", show_alert=True)
         return
@@ -1994,38 +2018,51 @@ async def ref_absent_pick_replacement(call: CallbackQuery, session: AsyncSession
     team_id = int(parts[3])
 
     absent_player = await session.get(Player, absent_player_id)
+    team_obj = await session.get(Team, team_id)
+    team_name = f"{team_obj.color_emoji} {team_obj.name}" if team_obj else "?"
 
-    # Все игроки уже в командах
-    tp_res = await session.execute(
-        select(TeamPlayer.player_id)
-        .join(Team, TeamPlayer.team_id == Team.id)
+    # Все команды игрового дня с составами
+    teams_res = await session.execute(
+        select(Team)
+        .options(selectinload(Team.players).selectinload(TeamPlayer.player))
         .where(Team.game_day_id == game_day_id)
     )
-    already_in_team = {row[0] for row in tp_res.all()}
+    all_teams = teams_res.scalars().all()
 
-    # Пришедшие участники (YES), не в командах, не сам отсутствующий
-    att_res = await session.execute(
-        select(Attendance)
-        .options(selectinload(Attendance.player))
-        .where(
-            Attendance.game_day_id == game_day_id,
-            Attendance.response == AttendanceResponse.YES,
-            Attendance.player_id.notin_(already_in_team),
-            Attendance.player_id != absent_player_id,
-        )
+    # player_id → team (для пометки «из другой команды»)
+    player_to_team: dict[int, Team] = {}
+    for t in all_teams:
+        for tp in t.players:
+            if tp.player:
+                player_to_team[tp.player_id] = t
+
+    # Все зарегистрированные в боте игроки (активные), кроме отсутствующего
+    all_players_res = await session.execute(
+        select(Player)
+        .where(Player.status == PlayerStatus.ACTIVE, Player.id != absent_player_id)
+        .order_by(Player.name)
     )
-    candidates = [a.player for a in att_res.scalars().all() if a.player]
-
-    if not candidates:
-        await call.answer("⚠️ Нет свободных игроков для замены.", show_alert=True)
-        return
+    all_players = all_players_res.scalars().all()
 
     builder = InlineKeyboardBuilder()
-    for p in candidates:
+
+    # Сначала — игроки из других команд этого дня
+    from_other_teams = [p for p in all_players if p.id in player_to_team and player_to_team[p.id].id != team_id]
+    # Затем — свободные (не в командах сегодня)
+    free_players = [p for p in all_players if p.id not in player_to_team]
+
+    for p in from_other_teams:
+        other_team = player_to_team[p.id]
         builder.button(
-            text=p.name,
+            text=f"{other_team.color_emoji} {p.name}",
             callback_data=f"ref_absent_confirm:{game_day_id}:{absent_player_id}:{team_id}:{p.id}"
         )
+    for p in free_players:
+        builder.button(
+            text=f"➕ {p.name}",
+            callback_data=f"ref_absent_confirm:{game_day_id}:{absent_player_id}:{team_id}:{p.id}"
+        )
+
     builder.adjust(2)
     builder.row(InlineKeyboardButton(
         text="🔙 Назад",
@@ -2033,12 +2070,15 @@ async def ref_absent_pick_replacement(call: CallbackQuery, session: AsyncSession
     ))
 
     absent_name = absent_player.name if absent_player else "?"
-    team_obj = await session.get(Team, team_id)
-    team_name = f"{team_obj.color_emoji} {team_obj.name}" if team_obj else "?"
+    hint = ""
+    if not from_other_teams and not free_players:
+        hint = "\n\n<i>Нет доступных игроков. Попроси игрока зарегистрироваться через /start в боте.</i>"
 
     await call.message.edit_text(
         f"🔄 <b>Замена для {absent_name}</b> ({team_name})\n\n"
-        "Выбери игрока, который войдёт в состав вместо него:",
+        f"Из других команд: {len(from_other_teams)} чел.\n"
+        f"Свободные (не в составе): {len(free_players)} чел.\n\n"
+        f"Выбери замену:{hint}",
         reply_markup=builder.as_markup()
     )
 
