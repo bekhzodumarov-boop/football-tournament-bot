@@ -1,7 +1,10 @@
+import logging
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from app.config import settings
 from app.database.models import Base
+
+logger = logging.getLogger(__name__)
 
 
 def _fix_db_url(url: str) -> str:
@@ -33,27 +36,54 @@ AsyncSessionFactory = async_sessionmaker(
 
 async def create_db_and_tables():
     # CREATE TABLE — внутри транзакции
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await _run_migrations(conn)
+    logger.info("DB: running create_all...")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            logger.info("DB: create_all OK, running migrations...")
+            await _run_migrations(conn)
+            logger.info("DB: migrations OK")
+    except Exception as e:
+        logger.error(f"DB: create_all/migrations FAILED: {e}", exc_info=True)
+        raise
 
     # ALTER TYPE нельзя внутри транзакции в PostgreSQL
     if not db_url.startswith("sqlite"):
-        async with engine.connect() as conn:
-            await conn.execution_options(isolation_level="AUTOCOMMIT")
-            await _run_enum_migrations(conn)
+        try:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                await _run_enum_migrations(conn)
+            logger.info("DB: enum migrations OK")
+        except Exception as e:
+            logger.warning(f"DB: enum migrations warning (non-fatal): {e}")
 
     # Создать лигу по умолчанию и привязать существующие данные
-    await _ensure_default_league()
+    try:
+        await _ensure_default_league()
+        logger.info("DB: ensure_default_league OK")
+    except Exception as e:
+        logger.warning(f"DB: ensure_default_league warning: {e}")
 
     # Заполнить player_leagues из существующих player.league_id
-    await _migrate_player_leagues()
+    try:
+        await _migrate_player_leagues()
+        logger.info("DB: migrate_player_leagues OK")
+    except Exception as e:
+        logger.warning(f"DB: migrate_player_leagues warning: {e}")
 
     # Загрузить ID создателей лиг в рантайм-кэш
-    await _load_league_admins()
+    try:
+        await _load_league_admins()
+        logger.info("DB: load_league_admins OK")
+    except Exception as e:
+        logger.warning(f"DB: load_league_admins warning: {e}")
 
     # Автозакрытие просроченных турниров
-    await _finish_overdue_game_days()
+    try:
+        await _finish_overdue_game_days()
+        logger.info("DB: finish_overdue_game_days OK")
+    except Exception as e:
+        logger.warning(f"DB: finish_overdue_game_days warning: {e}")
 
 
 async def _run_migrations(conn):
@@ -185,6 +215,17 @@ async def _run_migrations(conn):
         ))
         await conn.execute(text(
             "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_method VARCHAR(10)"
+        ))
+        # T-024: двухэтапный анонс
+        await conn.execute(text(
+            "ALTER TABLE game_days ADD COLUMN IF NOT EXISTS announce_at TIMESTAMP"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE game_days ADD COLUMN IF NOT EXISTS registration_open BOOLEAN NOT NULL DEFAULT TRUE"
+        ))
+        # T-013: Опаздываю
+        await conn.execute(text(
+            "ALTER TABLE attendances ADD COLUMN IF NOT EXISTS is_late BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         # user_activity, broadcast_logs создаются через Base.metadata.create_all — дополнительных миграций не требуется
 

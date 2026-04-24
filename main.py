@@ -50,15 +50,21 @@ async def main():
     register_all_handlers(dp)
 
     # Сбросить webhook и завершить конкурирующие getUpdates сессии
-    await bot.delete_webhook(drop_pending_updates=False)
-    logger.info("Webhook cleared")
+    logger.info("Clearing webhook...")
+    try:
+        await bot.delete_webhook(drop_pending_updates=False)
+        logger.info("Webhook cleared")
+    except Exception as e:
+        logger.error(f"delete_webhook failed: {e}", exc_info=True)
 
     # Создать таблицы в БД
+    logger.info("Initializing database...")
     await create_db_and_tables()
     logger.info("Database ready")
 
     # Запустить веб-сервер (WebApp + API)
     port = int(os.getenv("PORT", 8080))
+    logger.info(f"Starting WebApp on port {port}...")
     webapp = create_webapp()
     runner = web.AppRunner(webapp)
     await runner.setup()
@@ -72,8 +78,11 @@ async def main():
 
     # Передать бота модулю напоминаний и восстановить jobs после рестарта
     set_bot(bot)
-    await reschedule_all_reminders()
-    logger.info("Reminders rescheduled")
+    try:
+        await reschedule_all_reminders()
+        logger.info("Reminders rescheduled")
+    except Exception as e:
+        logger.warning(f"reschedule_all_reminders warning: {e}")
 
     # Уведомить Админа о запуске
     for admin_id in settings.ADMIN_IDS:
