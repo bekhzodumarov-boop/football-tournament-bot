@@ -359,6 +359,11 @@ async def gd_announce_execute(call: CallbackQuery, session: AsyncSession, bot: B
     if not game_day:
         return
 
+    # T-024: принудительно открываем регистрацию при ручном анонсе
+    if not game_day.registration_open:
+        game_day.registration_open = True
+        await session.commit()
+
     players = await _get_league_players(session, game_day.league_id, active_only=True)
 
     text = (
@@ -376,14 +381,14 @@ async def gd_announce_execute(call: CallbackQuery, session: AsyncSession, bot: B
             await bot.send_message(
                 player.telegram_id,
                 text,
-                reply_markup=join_game_kb(game_day.id, game_day.is_open)
+                reply_markup=join_game_kb(game_day.id, True)
             )
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.warning(f"Cannot send announce to {player.telegram_id}: {e}")
 
-    await call.message.answer(f"✅ Анонс отправлен {sent} игрокам.")
+    await call.message.answer(f"✅ Анонс отправлен {sent} игрокам. Регистрация открыта.")
 
 
 # ---------- Закрыть запись ----------

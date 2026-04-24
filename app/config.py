@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     GOOGLE_CREDENTIALS_JSON: str = ""
     GOOGLE_SHEET_ID: str = ""
 
+    # Anthropic Claude API — для AI-репортажа турнира
+    ANTHROPIC_API_KEY: str = ""
+
     @field_validator("ADMIN_IDS", "DEVELOPER_IDS", mode="before")
     @classmethod
     def parse_admin_ids(cls, v):

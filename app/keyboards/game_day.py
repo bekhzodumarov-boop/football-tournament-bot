@@ -46,10 +46,17 @@ def join_confirm_kb(game_day_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
 
 def confirm_attendance_kb(game_day_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
     """Кнопки финального подтверждения участия."""
+    late_labels = {"ru": "⏰ Опаздываю", "en": "⏰ Running late", "uz": "⏰ Kechikaman", "de": "⏰ Komme später"}
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text=t("btn_confirm_yes", lang), callback_data=f"confirm_yes:{game_day_id}"),
         InlineKeyboardButton(text=t("btn_confirm_no", lang), callback_data=f"confirm_no:{game_day_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=late_labels.get(lang, late_labels["ru"]),
+            callback_data=f"confirm_late:{game_day_id}",
+        )
     )
     return builder.as_markup()
 

@@ -2972,6 +2972,18 @@ async def gd_tournament_results(call: CallbackQuery, session: AsyncSession, bot:
         callback_data=f"gd_to_channel:{game_day_id}"
     ))
     builder.row(InlineKeyboardButton(
+        text="🖼 Картинка таблицы",
+        callback_data=f"gd_standings_img:{game_day_id}"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="🤖 AI Репортаж",
+        callback_data=f"gd_ai_report:{game_day_id}"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="✏️ Исправить данные",
+        callback_data=f"adm_edit_matches:{game_day_id}"
+    ))
+    builder.row(InlineKeyboardButton(
         text="🔙 Назад",
         callback_data=f"gd_players:{game_day_id}"
     ))
@@ -4116,6 +4128,10 @@ def _edit_match_kb(match_id: int, game_day_id: int, goals: list,
                 callback_data=f"adm_finish_match:{match_id}:{game_day_id}"
             )
         )
+    builder.row(
+        InlineKeyboardButton(text="👥 Состав хозяев", callback_data=f"adm_edit_roster:home:{match_id}:{game_day_id}"),
+        InlineKeyboardButton(text="👥 Состав гостей", callback_data=f"adm_edit_roster:away:{match_id}:{game_day_id}"),
+    )
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"adm_edit_matches:{game_day_id}"))
     return builder.as_markup()
 
@@ -4249,7 +4265,7 @@ async def adm_edit_match(call: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(F.data.startswith("adm_score:"))
 async def adm_score_adjust(call: CallbackQuery, session: AsyncSession):
-    """Изменить счёт матча на ±1."""
+    """±1 к счёту. При +1 — спрашивает кто забил."""
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
         return
@@ -4273,16 +4289,60 @@ async def adm_score_adjust(call: CallbackQuery, session: AsyncSession):
         return
 
     game_day_id = match.game_day_id
-    if side == "home":
-        new_val = max(0, match.score_home + (1 if direction == "plus" else -1))
-        match.score_home = new_val
-    else:
-        new_val = max(0, match.score_away + (1 if direction == "plus" else -1))
-        match.score_away = new_val
 
+    # +1 → перенаправляем на выбор игрока (команда уже известна)
+    if direction == "plus":
+        await call.answer()
+        team_id = match.team_home_id if side == "home" else match.team_away_id
+        team = match.team_home if side == "home" else match.team_away
+
+        # Загружаем игроков команды
+        players_result = await session.execute(
+            select(Player)
+            .join(TeamPlayer, TeamPlayer.player_id == Player.id)
+            .where(TeamPlayer.team_id == team_id)
+            .order_by(Player.name)
+        )
+        players = players_result.scalars().all()
+        if not players:
+            # Fallback: все записавшиеся на этот день
+            players_result = await session.execute(
+                select(Player)
+                .join(Attendance, Attendance.player_id == Player.id)
+                .where(
+                    Attendance.game_day_id == game_day_id,
+                    Attendance.response == AttendanceResponse.YES,
+                )
+                .order_by(Player.name)
+            )
+            players = players_result.scalars().all()
+
+        builder = InlineKeyboardBuilder()
+        for p in players:
+            builder.button(
+                text=p.name,
+                callback_data=f"adm_add_goal_save:{match_id}:{team_id}:{p.id}:{game_day_id}"
+            )
+        builder.adjust(2)
+        builder.row(InlineKeyboardButton(
+            text="🔙 Назад",
+            callback_data=f"adm_edit_match:{match_id}:{game_day_id}"
+        ))
+
+        team_emoji = team.color_emoji or ""
+        await call.message.edit_text(
+            f"➕ <b>Гол — {team_emoji} {team.name}</b>\n\nКто забил?",
+            reply_markup=builder.as_markup()
+        )
+        return
+
+    # -1 → просто уменьшаем счёт
+    if side == "home":
+        match.score_home = max(0, match.score_home - 1)
+    else:
+        match.score_away = max(0, match.score_away - 1)
     await session.commit()
 
-    # Refresh
     match = await session.get(
         Match, match_id,
         options=[
@@ -4291,7 +4351,6 @@ async def adm_score_adjust(call: CallbackQuery, session: AsyncSession):
             selectinload(Match.goals).selectinload(Goal.player),
         ]
     )
-
     home = match.team_home.name
     away = match.team_away.name
     lines = [
@@ -4571,3 +4630,368 @@ async def adm_del_goal(call: CallbackQuery, session: AsyncSession):
         "\n".join(lines),
         reply_markup=_edit_match_kb(match_id, game_day_id, match.goals, is_finished=match.status == MatchStatus.FINISHED)
     )
+
+
+# ══════════════════════════════════════════════════════
+#  РЕДАКТИРОВАНИЕ СОСТАВА КОМАНДЫ В МАТЧЕ
+# ══════════════════════════════════════════════════════
+
+def _roster_edit_kb(
+    side: str,           # "home" | "away"
+    match_id: int,
+    game_day_id: int,
+    team_id: int,
+    current_player_ids: set[int],
+    all_players: list[dict],   # [{"id": int, "name": str}, ...]
+) -> "InlineKeyboardMarkup":
+    """Клавиатура редактирования состава команды."""
+    builder = InlineKeyboardBuilder()
+
+    # Текущие игроки с кнопкой удаления
+    for p in all_players:
+        if p["id"] in current_player_ids:
+            builder.row(InlineKeyboardButton(
+                text=f"❌ {p['name']}",
+                callback_data=f"adm_roster_remove:{side}:{match_id}:{game_day_id}:{team_id}:{p['id']}"
+            ))
+
+    # Доступные для добавления (не в этой команде)
+    for p in all_players:
+        if p["id"] not in current_player_ids:
+            builder.row(InlineKeyboardButton(
+                text=f"➕ {p['name']}",
+                callback_data=f"adm_roster_add:{side}:{match_id}:{game_day_id}:{team_id}:{p['id']}"
+            ))
+
+    builder.row(InlineKeyboardButton(
+        text="🔙 Назад к матчу",
+        callback_data=f"adm_edit_match:{match_id}:{game_day_id}"
+    ))
+    return builder.as_markup()
+
+
+async def _show_roster_panel(
+    call: CallbackQuery,
+    session: AsyncSession,
+    side: str,
+    match_id: int,
+    game_day_id: int,
+    team_id: int,
+) -> None:
+    """Общая функция отображения панели редактирования состава."""
+    try:
+        from app.database.models import Team as TeamModel
+
+        # Данные матча — скалярный запрос, без ORM-объектов
+        match_row = await session.execute(
+            select(Match.team_home_id, Match.team_away_id)
+            .where(Match.id == match_id)
+        )
+        match_data = match_row.first()
+        if not match_data:
+            await call.message.edit_text("❌ Матч не найден.")
+            return
+        home_team_id, away_team_id = match_data
+
+        opp_team_id = away_team_id if side == "home" else home_team_id
+
+        # Данные команд — скалярные запросы
+        team_row = await session.execute(
+            select(TeamModel.name, TeamModel.color_emoji).where(TeamModel.id == team_id)
+        )
+        t = team_row.first()
+        team_name = t[0] if t else "?"
+        team_emoji = (t[1] or "") if t else ""
+
+        opp_row = await session.execute(
+            select(TeamModel.name, TeamModel.color_emoji).where(TeamModel.id == opp_team_id)
+        )
+        o = opp_row.first()
+        opp_name = o[0] if o else "?"
+        opp_emoji = (o[1] or "") if o else ""
+
+        # Текущий состав — только player_id
+        tp_res = await session.execute(
+            select(TeamPlayer.player_id).where(TeamPlayer.team_id == team_id)
+        )
+        current_player_ids: set[int] = {row[0] for row in tp_res.all()}
+
+        # Пул = записавшиеся на этот день
+        att_res = await session.execute(
+            select(Player.id, Player.name)
+            .join(Attendance, Attendance.player_id == Player.id)
+            .where(
+                Attendance.game_day_id == game_day_id,
+                Attendance.response == AttendanceResponse.YES,
+            )
+            .order_by(Player.name)
+        )
+        all_players = [{"id": row[0], "name": row[1]} for row in att_res.all()]
+
+        side_label = "хозяев" if side == "home" else "гостей"
+        header = (
+            f"👥 <b>Состав {side_label}</b>\n"
+            f"{team_emoji} <b>{team_name}</b> vs {opp_emoji} {opp_name}\n\n"
+            f"❌ — убрать  |  ➕ — добавить"
+        )
+
+        await call.message.edit_text(
+            header,
+            reply_markup=_roster_edit_kb(
+                side, match_id, game_day_id, team_id,
+                current_player_ids, all_players
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"_show_roster_panel error: {e}", exc_info=True)
+        await call.message.edit_text(f"❌ Ошибка: {type(e).__name__}: {e}")
+
+
+@router.callback_query(F.data.startswith("adm_edit_roster:"))
+async def adm_edit_roster(call: CallbackQuery, session: AsyncSession):
+    """Открывает панель редактирования состава команды."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    # adm_edit_roster:{side}:{match_id}:{game_day_id}
+    _, side, match_id_s, game_day_id_s = call.data.split(":")
+    match_id = int(match_id_s)
+    game_day_id = int(game_day_id_s)
+
+    row = await session.execute(
+        select(Match.team_home_id, Match.team_away_id).where(Match.id == match_id)
+    )
+    match_data = row.first()
+    if not match_data:
+        await call.message.edit_text("❌ Матч не найден.")
+        return
+
+    team_id = match_data[0] if side == "home" else match_data[1]
+    await _show_roster_panel(call, session, side, match_id, game_day_id, team_id)
+
+
+@router.callback_query(F.data.startswith("adm_roster_remove:"))
+async def adm_roster_remove(call: CallbackQuery, session: AsyncSession):
+    """Удаляет игрока из состава команды."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    # adm_roster_remove:{side}:{match_id}:{game_day_id}:{team_id}:{player_id}
+    parts = call.data.split(":")
+    side = parts[1]
+    match_id = int(parts[2])
+    game_day_id = int(parts[3])
+    team_id = int(parts[4])
+    player_id = int(parts[5])
+
+    tp_res = await session.execute(
+        select(TeamPlayer).where(
+            TeamPlayer.team_id == team_id,
+            TeamPlayer.player_id == player_id,
+        )
+    )
+    tp = tp_res.scalar_one_or_none()
+    if tp:
+        await session.delete(tp)
+        await session.commit()
+        await call.answer("✅ Игрок удалён из состава")
+    else:
+        await call.answer("⚠️ Игрок не найден в составе")
+
+    await _show_roster_panel(call, session, side, match_id, game_day_id, team_id)
+
+
+@router.callback_query(F.data.startswith("adm_roster_add:"))
+async def adm_roster_add(call: CallbackQuery, session: AsyncSession):
+    """Добавляет игрока в состав команды."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    # adm_roster_add:{side}:{match_id}:{game_day_id}:{team_id}:{player_id}
+    parts = call.data.split(":")
+    side = parts[1]
+    match_id = int(parts[2])
+    game_day_id = int(parts[3])
+    team_id = int(parts[4])
+    player_id = int(parts[5])
+
+    existing = await session.execute(
+        select(TeamPlayer).where(
+            TeamPlayer.team_id == team_id,
+            TeamPlayer.player_id == player_id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        await call.answer("⚠️ Игрок уже в составе")
+    else:
+        session.add(TeamPlayer(team_id=team_id, player_id=player_id))
+        await session.commit()
+        await call.answer("✅ Игрок добавлен в состав")
+
+    await _show_roster_panel(call, session, side, match_id, game_day_id, team_id)
+
+
+# ══════════════════════════════════════════════════════
+#  AI РЕПОРТАЖ ТУРНИРА (Claude API)
+# ══════════════════════════════════════════════════════
+
+def _build_report_prompt(data: "TournamentData") -> str:
+    """Формирует промпт для Claude на основе данных турнира."""
+    from app.database.models import GoalType
+
+    gd = data.game_day
+    date_str = gd.scheduled_at.strftime("%d.%m.%Y")
+    lines = [
+        f"Напиши живой, увлекательный репортаж об итогах любительского футбольного турнира.",
+        f"Пиши на русском языке. Стиль — спортивный журналист, эмоционально, с юмором, но по делу.",
+        f"Используй эмодзи умеренно. Объём — 300–500 слов.",
+        f"",
+        f"=== ДАННЫЕ ТУРНИРА ===",
+        f"Название: {gd.display_name}",
+        f"Дата: {date_str}",
+        f"Место: {gd.location}",
+        f"Всего матчей: {data.total_matches}",
+        f"Всего голов: {data.total_goals}",
+        f"",
+    ]
+
+    # Итоговые места
+    if data.place_teams:
+        lines.append("ИТОГОВЫЕ МЕСТА:")
+        medals = {1: "🥇 1 место", 2: "🥈 2 место", 3: "🥉 3 место", 4: "4 место"}
+        for place, team in sorted(data.place_teams.items()):
+            if team:
+                roster = data.team_rosters.get(team.id, [])
+                roster_str = f" (игроки: {', '.join(roster)})" if roster else ""
+                lines.append(f"  {medals.get(place, f'{place} место')}: {team.name}{roster_str}")
+        lines.append("")
+
+    # Матчи по стадиям
+    group_matches = [m for m in data.finished_matches if (m.match_stage or "group") == "group"]
+    playoff_matches = [m for m in data.finished_matches if (m.match_stage or "group") != "group"]
+
+    if group_matches:
+        lines.append("ГРУППОВОЙ ЭТАП:")
+        for i, m in enumerate(group_matches, 1):
+            goal_details = []
+            for g in sorted(m.goals, key=lambda x: x.scored_at):
+                if g.player:
+                    own = " (авт.)" if g.goal_type == GoalType.OWN_GOAL else ""
+                    team_name = m.team_home.name if g.team_id == m.team_home_id else m.team_away.name
+                    goal_details.append(f"{g.player.name}{own} ({team_name})")
+            goals_str = f" — голы: {', '.join(goal_details)}" if goal_details else ""
+            lines.append(
+                f"  Матч {i}: {m.team_home.name} {m.score_home}:{m.score_away} {m.team_away.name}{goals_str}"
+            )
+        lines.append("")
+
+    stage_labels = {"semifinal": "ПОЛУФИНАЛ", "third_place": "МАТЧ ЗА 3-Е МЕСТО", "final": "ФИНАЛ"}
+    for m in playoff_matches:
+        label = stage_labels.get(m.match_stage or "", "МАТЧ")
+        goal_details = []
+        for g in sorted(m.goals, key=lambda x: x.scored_at):
+            if g.player:
+                own = " (авт.)" if g.goal_type == GoalType.OWN_GOAL else ""
+                team_name = m.team_home.name if g.team_id == m.team_home_id else m.team_away.name
+                goal_details.append(f"{g.player.name}{own} ({team_name})")
+        goals_str = f" — голы: {', '.join(goal_details)}" if goal_details else ""
+        lines.append(
+            f"{label}: {m.team_home.name} {m.score_home}:{m.score_away} {m.team_away.name}{goals_str}"
+        )
+    if playoff_matches:
+        lines.append("")
+
+    # Бомбардиры
+    if data.scorer_stats:
+        top = sorted(data.scorer_stats.values(), key=lambda x: x["count"], reverse=True)[:5]
+        lines.append("БОМБАРДИРЫ:")
+        for s in top:
+            lines.append(f"  {s['name']} — {s['count']} гол(ов)")
+        lines.append("")
+
+    # Лучший игрок
+    if data.best_player_name:
+        lines.append(f"ЛУЧШИЙ ИГРОК ПО ГОЛОСОВАНИЮ: {data.best_player_name}")
+        lines.append("")
+
+    # Вратари
+    if data.gk_stats:
+        lines.append("ВРАТАРИ:")
+        for tid, gk in data.gk_stats.items():
+            if gk.get("gk_name"):
+                lines.append(
+                    f"  {gk['gk_name']} ({gk['team_name']}) — {gk['saves']} сейвов, "
+                    f"пропустил {gk['goals_conceded']}"
+                )
+        lines.append("")
+
+    lines.append("Напиши репортаж, опираясь только на эти данные. Не придумывай детали которых нет.")
+    return "\n".join(lines)
+
+
+async def _call_claude_api(prompt: str, api_key: str) -> str:
+    """Асинхронный вызов Claude API через официальный SDK."""
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=api_key)
+    message = await client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return message.content[0].text
+
+
+@router.callback_query(F.data.startswith("gd_ai_report:"))
+async def gd_ai_report(call: CallbackQuery, session: AsyncSession):
+    """Генерирует AI-репортаж турнира через Claude API."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    if not settings.ANTHROPIC_API_KEY:
+        await call.answer("⚠️ ANTHROPIC_API_KEY не задан в настройках.", show_alert=True)
+        return
+
+    await call.answer("⏳ Генерирую репортаж...")
+    await call.message.edit_text("🤖 <b>Генерирую репортаж...</b>\n\n⏳ Обычно занимает 5–10 секунд.")
+
+    game_day_id = int(call.data.split(":")[1])
+    data = await _gather_tournament_data(session, game_day_id)
+    if not data:
+        await call.message.edit_text("⚠️ Нет завершённых матчей.")
+        return
+
+    try:
+        prompt = _build_report_prompt(data)
+        report_text = await _call_claude_api(prompt, settings.ANTHROPIC_API_KEY)
+    except Exception as e:
+        logger.error(f"AI report error: {e}", exc_info=True)
+        await call.message.edit_text(
+            f"❌ Ошибка при генерации репортажа:\n<code>{type(e).__name__}: {e}</code>\n\n"
+            "Проверь ANTHROPIC_API_KEY в переменных окружения Railway."
+        )
+        return
+
+    # Показываем репортаж с кнопками
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="🔄 Сгенерировать заново",
+        callback_data=f"gd_ai_report:{game_day_id}"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="🔙 К итогам",
+        callback_data=f"gd_tournament_results:{game_day_id}"
+    ))
+
+    # Telegram ограничение 4096 символов
+    header = f"🤖 <b>AI Репортаж — {data.game_day.display_name}</b>\n\n"
+    full_text = header + report_text
+    if len(full_text) > 4096:
+        full_text = full_text[:4090] + "…"
+
+    await call.message.edit_text(full_text, reply_markup=builder.as_markup())

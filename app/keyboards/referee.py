@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
@@ -13,7 +13,8 @@ def referee_gamedays_kb(game_days: list) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def referee_gd_kb(game_day_id: int, matches: list) -> InlineKeyboardMarkup:
+def referee_gd_kb(game_day_id: int, matches: list,
+                  webapp_url: str = "") -> InlineKeyboardMarkup:
     """Панель игрового дня для судьи"""
     builder = InlineKeyboardBuilder()
     group_counter = 0
@@ -59,6 +60,12 @@ def referee_gd_kb(game_day_id: int, matches: list) -> InlineKeyboardMarkup:
         text="🔄 Замена не пришедшего",
         callback_data=f"ref_absent:{game_day_id}"
     ))
+    if webapp_url:
+        ref_url = f"{webapp_url.rstrip('/')}/referee?gd={game_day_id}"
+        builder.row(InlineKeyboardButton(
+            text="📱 Судейская панель (WebApp)",
+            web_app=WebAppInfo(url=ref_url),
+        ))
     return builder.as_markup()
 
 
@@ -260,6 +267,16 @@ def pick_format_kb(game_day_id: int = 0) -> InlineKeyboardMarkup:
         builder.row(InlineKeyboardButton(
             text="🔙 Назад", callback_data=f"ref_cancel_new_match:{game_day_id}"
         ))
+    return builder.as_markup()
+
+
+def referee_webapp_kb(game_day_id: int, webapp_url: str) -> InlineKeyboardMarkup:
+    """Кнопка открытия WebApp для судьи."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="📱 Открыть судейскую панель",
+        web_app=WebAppInfo(url=webapp_url),
+    ))
     return builder.as_markup()
 
 

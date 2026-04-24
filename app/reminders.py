@@ -49,7 +49,21 @@ async def _send_reminder(game_day_id: int, hours_before: int) -> None:
         )
         attendances = result.scalars().all()
 
-        if hours_before >= 9:
+        if hours_before >= 24:
+            # За 24ч — «завтра игра» без кнопок подтверждения
+            for att in attendances:
+                try:
+                    text = (
+                        f"📅 <b>Завтра игра!</b>\n\n"
+                        f"🕐 {time_str}  📍 {game_day.location}\n"
+                        f"💰 Взнос: {game_day.cost_per_player} сум.\n\n"
+                        "Готовься! ⚽"
+                    )
+                    await _bot.send_message(att.player.telegram_id, text, parse_mode="HTML")
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    pass
+        elif hours_before >= 9:
             # За 9ч — напоминание с кнопками подтверждения
             for att in attendances:
                 try:
@@ -64,6 +78,7 @@ async def _send_reminder(game_day_id: int, hours_before: int) -> None:
                         att.player.telegram_id,
                         text,
                         reply_markup=confirm_attendance_kb(game_day.id, lang),
+                        parse_mode="HTML",
                     )
                     await asyncio.sleep(0.05)
                 except Exception:
@@ -183,16 +198,106 @@ async def _send_confirm_reminder(game_day_id: int, reminder_type: str) -> None:
         await session.commit()
 
 
+async def _send_announcement(game_day_id: int) -> None:
+    """
+    T-024: Разослать полноценный анонс с кнопками записи.
+    Вызывается APScheduler-ом в announce_at или сразу при создании.
+    """
+    if not _bot:
+        return
+
+    async with AsyncSessionFactory() as session:
+        from sqlalchemy.orm import selectinload as _sil
+        from app.database.models import Player, PlayerLeague, PlayerStatus
+        from sqlalchemy import update as sa_update
+
+        game_day = await session.get(GameDay, game_day_id)
+        if not game_day or game_day.status == GameDayStatus.CANCELLED:
+            return
+
+        # Открыть регистрацию
+        game_day.registration_open = True
+        await session.commit()
+
+        # Найти всех активных игроков лиги
+        if game_day.league_id is not None:
+            from sqlalchemy import select as sa_select
+            result = await session.execute(
+                sa_select(Player)
+                .join(PlayerLeague, PlayerLeague.player_id == Player.id)
+                .where(
+                    PlayerLeague.league_id == game_day.league_id,
+                    Player.status == PlayerStatus.ACTIVE,
+                )
+            )
+        else:
+            from sqlalchemy import select as sa_select
+            result = await session.execute(
+                sa_select(Player).where(Player.status == PlayerStatus.ACTIVE)
+            )
+        players = result.scalars().all()
+
+        date_str = game_day.scheduled_at.strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"🎉 <b>Регистрация открыта — {game_day.display_name}!</b>\n\n"
+            f"📅 {date_str}\n"
+            f"📍 {game_day.location}\n"
+            f"👥 Мест: {game_day.player_limit}\n\n"
+            "Успей записаться! 👇"
+        )
+
+        for p in players:
+            try:
+                lang = getattr(p, "language", None) or "ru"
+                await _bot.send_message(
+                    p.telegram_id,
+                    text,
+                    reply_markup=join_game_kb(game_day.id, True, lang),
+                    parse_mode="HTML",
+                )
+                await asyncio.sleep(0.05)
+            except Exception:
+                pass
+
+
+def schedule_announcement(game_day: GameDay) -> None:
+    """T-024: Запланировать рассылку анонса на announce_at."""
+    if not game_day.announce_at:
+        return
+    now = datetime.now()
+    if game_day.announce_at > now:
+        scheduler.add_job(
+            _send_announcement,
+            trigger="date",
+            run_date=game_day.announce_at,
+            args=[game_day.id],
+            id=f"announce_{game_day.id}",
+            replace_existing=True,
+        )
+
+
 def schedule_reminders(game_day: GameDay) -> None:
-    """Запланировать напоминания за 9ч, 2ч, накануне 20:00 и в день игры 12:00."""
+    """Запланировать напоминания за 24ч, 2ч, накануне 20:00 и в день игры 12:00."""
     now = datetime.now()
     gd_id = game_day.id
     game_dt = game_day.scheduled_at  # naive Tashkent local time
 
+    # --- напоминание за 24ч: «завтра игра» ---
+    reminder_24h = game_dt - timedelta(hours=24)
     # --- напоминание за 9ч: всем записавшимся ---
     reminder_9h = game_dt - timedelta(hours=9)
     # --- напоминание за 2ч: с проверкой подтверждения ---
     reminder_2h = game_dt - timedelta(hours=2)
+
+    if reminder_24h > now:
+        scheduler.add_job(
+            _send_reminder,
+            trigger="date",
+            run_date=reminder_24h,
+            args=[gd_id, 24],
+            id=f"reminder_{gd_id}_24h",
+            replace_existing=True,
+        )
 
     if reminder_9h > now:
         scheduler.add_job(
@@ -243,7 +348,7 @@ def schedule_reminders(game_day: GameDay) -> None:
 
 async def reschedule_all_reminders() -> None:
     """
-    При старте бота — восстановить напоминания для всех предстоящих игровых дней.
+    При старте бота — восстановить напоминания и анонсы для всех предстоящих игровых дней.
     APScheduler не сохраняет jobs между рестартами (MemoryJobStore).
     """
     now = datetime.now()
@@ -257,3 +362,6 @@ async def reschedule_all_reminders() -> None:
         game_days = result.scalars().all()
         for gd in game_days:
             schedule_reminders(gd)
+            # T-024: восстановить запланированный анонс если регистрация ещё не открыта
+            if not gd.registration_open and gd.announce_at and gd.announce_at > now:
+                schedule_announcement(gd)

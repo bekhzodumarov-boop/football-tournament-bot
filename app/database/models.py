@@ -173,6 +173,9 @@ class GameDay(Base):
     location: Mapped[str] = mapped_column(String(200))
     player_limit: Mapped[int] = mapped_column(Integer, default=20)
     registration_deadline: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # T-024: двухэтапный анонс
+    announce_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    registration_open: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     cost_per_player: Mapped[int] = mapped_column(Integer, default=0)
     match_format: Mapped[MatchFormat] = mapped_column(Enum(MatchFormat), default=MatchFormat.TIME)
     match_duration_min: Mapped[int] = mapped_column(Integer, default=30)
@@ -201,6 +204,8 @@ class GameDay(Base):
         now = datetime.now()
         if self.status != GameDayStatus.ANNOUNCED:
             return False
+        if not self.registration_open:
+            return False  # T-024: анонс ещё не разослан
         if self.registration_deadline and now > self.registration_deadline:
             return False
         return True  # Запись открыта; waitlist включается автоматически при достижении лимита
@@ -222,6 +227,7 @@ class Attendance(Base):
         Enum(AttendanceResponse), default=AttendanceResponse.NO_RESPONSE
     )
     confirmed_final: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_late: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")  # T-013: Опаздываю
     actually_came: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     responded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
