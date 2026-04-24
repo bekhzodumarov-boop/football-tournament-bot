@@ -426,7 +426,8 @@ async def ref_select_gameday(call: CallbackQuery, session: AsyncSession,
     await call.message.edit_text(
         f"🦺 <b>Игровой день {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}</b>\n"
         f"📍 {game_day.location}\n\nВыбери матч или создай новый:{schedule_hint}",
-        reply_markup=referee_gd_kb(game_day_id, matches)
+        reply_markup=referee_gd_kb(game_day_id, matches,
+                                   webapp_url=settings.WEBAPP_URL)
     )
 
 
@@ -1374,6 +1375,21 @@ async def _advance_playoff(session, match: Match, bot: Bot) -> str | None:
     if "final" in existing_stages and "third_place" in existing_stages:
         return None  # Уже созданы
 
+    # Подгружаем серии пенальти для ничьих (T-025)
+    penalty_winners: dict[int, int] = {}  # match_id → winner_team_id
+    for semi in finished_semis:
+        if semi.score_home == semi.score_away:
+            ps_res = await session.execute(
+                select(PenaltyShootout).where(
+                    PenaltyShootout.match_id == semi.id,
+                    PenaltyShootout.finished == True,
+                    PenaltyShootout.winner_team_id.is_not(None),
+                )
+            )
+            ps = ps_res.scalar_one_or_none()
+            if ps and ps.winner_team_id:
+                penalty_winners[semi.id] = ps.winner_team_id
+
     # Определяем победителей и проигравших
     def winner_loser(m: Match):
         if m.score_home > m.score_away:
@@ -1381,9 +1397,12 @@ async def _advance_playoff(session, match: Match, bot: Bot) -> str | None:
         elif m.score_away > m.score_home:
             return m.team_away_id, m.team_home_id
         else:
-            # Ничья в полуфинале — победитель по серии пенальти, если есть
-            from app.database.models import PenaltyShootout
-            return m.team_home_id, m.team_away_id  # fallback
+            # Ничья — проверяем серию пенальти
+            pw = penalty_winners.get(m.id)
+            if pw:
+                loser = m.team_away_id if pw == m.team_home_id else m.team_home_id
+                return pw, loser
+            return m.team_home_id, m.team_away_id  # fallback: хозяин побеждает
 
     w1, l1 = winner_loser(finished_semis[0])
     w2, l2 = winner_loser(finished_semis[1])
@@ -2468,6 +2487,8 @@ async def ref_standings_image(call: CallbackQuery, player: Player | None,
                 "stage": stage,
                 "home": m.team_home.name[:12],
                 "away": m.team_away.name[:12],
+                "home_emoji": getattr(m.team_home, "color_emoji", ""),
+                "away_emoji": getattr(m.team_away, "color_emoji", ""),
                 "score_h": m.score_home,
                 "score_a": m.score_away,
                 "finished": m.status == MatchStatus.FINISHED,
@@ -2545,13 +2566,17 @@ async def ref_sub_select_out(call: CallbackQuery, session: AsyncSession,
         return
 
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
-    # Показываем ВСЕХ записавшихся — даже ранее заменённые могут снова выйти на поле
-    players = await _get_attendees(session, match.game_day_id)
+    # Показываем только тех, кто сейчас в составе этой команды (TeamPlayer)
+    players = await _get_team_players(session, team_id)
+
     if not players:
-        players = await _get_team_players(session, team_id)
+        await call.answer("⚠️ В составе команды нет игроков.", show_alert=True)
+        return
 
     await call.message.edit_text(
-        f"🔄 <b>Замена — {team_name}</b>\n\nКто <b>выходит</b> (покидает поле)?",
+        f"🔄 <b>Замена — {team_name}</b>\n\n"
+        f"Текущий состав: {len(players)} чел.\n\n"
+        f"Кто <b>выходит</b> (покидает поле)?",
         reply_markup=sub_player_out_kb(match_id, team_id, players)
     )
 
@@ -2577,19 +2602,28 @@ async def ref_sub_select_in(call: CallbackQuery, session: AsyncSession,
 
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
 
-    # Доступны для замены: ВСЕ 19 записавшихся кроме самого выходящего
-    all_attendees = await _get_attendees(session, match.game_day_id)
+    # Текущие составы обеих команд
     team_home_players = await _get_team_players(session, match.team_home_id)
     team_away_players = await _get_team_players(session, match.team_away_id)
+    current_team_ids = {p.id for p in (team_home_players if team_id == match.team_home_id else team_away_players)}
+    other_team_ids   = {p.id for p in (team_away_players if team_id == match.team_home_id else team_home_players)}
 
-    available_subs = [p for p in all_attendees if p.id != player_out_id]
+    # Все записавшиеся на игровой день — кандидаты для замены
+    all_attendees = await _get_attendees(session, match.game_day_id)
+
+    # Доступны для замены: не выходящий игрок и не состоящий сейчас в этой команде
+    # (игроки с лавки + игроки из другой команды, помечаются *)
+    available_subs = [
+        p for p in all_attendees
+        if p.id != player_out_id and p.id not in current_team_ids
+    ]
+    # Если нет никого на замену — показать всех из команды (хоть кто-то)
+    if not available_subs:
+        available_subs = [p for p in all_attendees if p.id != player_out_id]
 
     if not available_subs:
         await call.answer("⚠️ Нет доступных игроков для замены.", show_alert=True)
         return
-
-    # Пометить игроков из другой команды
-    other_team_ids = {p.id for p in (team_away_players if team_id == match.team_home_id else team_home_players)}
 
     await call.message.edit_text(
         f"🔄 <b>Замена — {team_name}</b>\n\n"

@@ -19,7 +19,7 @@ from app.database.models import (
 )
 from app.keyboards.game_day import join_game_kb, join_confirm_kb, game_day_action_kb
 from app.data.reglament import REGLAMENT_AGREEMENT, REGLAMENT_AGREEMENT_EN
-from app.reminders import schedule_reminders
+from app.reminders import schedule_reminders, schedule_announcement
 from app.locales.texts import t, t_g
 
 logger = logging.getLogger(__name__)
@@ -146,6 +146,10 @@ async def gd_standings(call: CallbackQuery, session: AsyncSession,
     all_matches = all_matches_result.scalars().all()
 
     builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="🖼 Картинка таблицы",
+        callback_data=f"gd_standings_img:{game_day_id}"
+    ))
     builder.row(InlineKeyboardButton(
         text="🔙 Назад",
         callback_data="next_game"
@@ -526,15 +530,25 @@ async def create_gd_limit(message: Message, state: FSMContext,
     # Вычислить следующий порядковый номер турнира (минимальный свободный)
     tournament_number = await _next_tournament_number(session, league_id)
 
+    # T-024: вычислить время анонса — за 3 дня в 20:00
+    now = datetime.now()
+    announce_at = (scheduled_at - timedelta(days=3)).replace(
+        hour=20, minute=0, second=0, microsecond=0
+    )
+    # Если announce_at уже прошёл или игра через <3 дней — открываем регистрацию сразу
+    announce_immediately = announce_at <= now
+
     game_day = GameDay(
         scheduled_at=scheduled_at,
         location=data["location"],
         player_limit=limit,
-        cost_per_player=0,  # устанавливается после игры через "Финансовый итог"
+        cost_per_player=0,
         registration_deadline=deadline,
         status=GameDayStatus.ANNOUNCED,
         league_id=league_id,
         tournament_number=tournament_number,
+        announce_at=announce_at,
+        registration_open=announce_immediately,
     )
     session.add(game_day)
     await session.commit()
@@ -543,6 +557,20 @@ async def create_gd_limit(message: Message, state: FSMContext,
 
     schedule_reminders(game_day)
 
+    if announce_immediately:
+        # Анонс разослать немедленно
+        status_text = "Анонс автоматически разослан всем игрокам лиги 📢"
+        await _auto_announce(session, bot, game_day, league_id)
+    else:
+        # Запланировать анонс на announce_at
+        schedule_announcement(game_day)
+        status_text = (
+            f"📣 Анонс с регистрацией будет разослан автоматически\n"
+            f"🗓 {announce_at.strftime('%d.%m.%Y в %H:%M')}\n\n"
+            f"Сейчас игрокам отправлено уведомление о создании турнира."
+        )
+        await _notify_tournament_created(session, bot, game_day, league_id)
+
     from app.keyboards.main_menu import admin_menu_kb
     await message.answer(
         f"✅ <b>{game_day.display_name} создан!</b>\n\n"
@@ -550,12 +578,9 @@ async def create_gd_limit(message: Message, state: FSMContext,
         f"📍 {game_day.location}\n"
         f"👥 Лимит: {game_day.player_limit} игроков\n"
         f"🔒 Запись закрывается: {deadline.strftime('%d.%m %H:%M')}\n\n"
-        "Анонс автоматически разослан всем игрокам лиги 📢",
+        + status_text,
         reply_markup=game_day_action_kb(game_day.id)
     )
-
-    # Авторассылка анонса всем игрокам лиги
-    await _auto_announce(session, bot, game_day, league_id)
 
 
 async def _next_tournament_number(session: AsyncSession, league_id) -> int:
@@ -670,3 +695,176 @@ async def _auto_announce(session: AsyncSession, bot: Bot,
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.warning(f"Cannot send announce to {p.telegram_id}: {e}")
+
+
+async def _notify_tournament_created(session: AsyncSession, bot: Bot,
+                                     game_day: GameDay, league_id) -> None:
+    """T-024: Рассылка уведомления о создании турнира (без кнопок записи)."""
+    from app.database.models import PlayerLeague, PlayerStatus
+    if league_id is not None:
+        result = await session.execute(
+            select(Player)
+            .join(PlayerLeague, PlayerLeague.player_id == Player.id)
+            .where(
+                PlayerLeague.league_id == league_id,
+                Player.status == PlayerStatus.ACTIVE,
+            )
+        )
+    else:
+        result = await session.execute(
+            select(Player).where(Player.status == PlayerStatus.ACTIVE)
+        )
+    players = result.scalars().all()
+
+    announce_str = game_day.announce_at.strftime("%d.%m.%Y в %H:%M") if game_day.announce_at else "—"
+    text = (
+        f"📣 <b>Новый турнир запланирован!</b>\n\n"
+        f"🏆 {game_day.display_name}\n"
+        f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"📍 {game_day.location}\n"
+        f"👥 Мест: {game_day.player_limit}\n\n"
+        f"⏳ <b>Регистрация откроется {announce_str}</b>\n"
+        "Следи за уведомлениями! 🔔"
+    )
+
+    for p in players:
+        try:
+            await bot.send_message(p.telegram_id, text, parse_mode="HTML")
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Cannot send tournament_created to {p.telegram_id}: {e}")
+
+
+# ---------- T-013: Подтверждение «Опаздываю» ----------
+
+@router.callback_query(F.data.startswith("confirm_late:"))
+async def confirm_attendance_late(call: CallbackQuery, session: AsyncSession,
+                                  player: Player | None):
+    await call.answer()
+    if not player:
+        return
+
+    game_day_id = int(call.data.split(":")[1])
+    result = await session.execute(
+        select(Attendance).where(
+            Attendance.game_day_id == game_day_id,
+            Attendance.player_id == player.id,
+        )
+    )
+    att = result.scalar_one_or_none()
+
+    if att and att.response == AttendanceResponse.YES:
+        att.confirmed_final = True
+        att.is_late = True
+        await session.commit()
+
+    lang = getattr(player, 'language', None) or 'ru'
+    late_responses = {
+        "ru": "⏰ <b>Понял, опаздываешь!</b>\n\nПостарайся прийти как можно скорее. Команда ждёт! ⚽",
+        "en": "⏰ <b>Got it, you're running late!</b>\n\nTry to get there as soon as you can. The team is waiting! ⚽",
+        "uz": "⏰ <b>Tushunarli, kechikasiz!</b>\n\nImkon qadar tezroq kelishga harakat qiling. Jamoa kutmoqda! ⚽",
+        "de": "⏰ <b>Verstanden, du kommst später!</b>\n\nKomm so schnell wie möglich. Das Team wartet! ⚽",
+    }
+    await call.message.edit_text(
+        late_responses.get(lang, late_responses["ru"]),
+        parse_mode="HTML"
+    )
+
+
+# ---------- Картинка таблицы (доступна всем) ----------
+
+@router.callback_query(F.data.startswith("gd_standings_img:"))
+async def gd_standings_image(call: CallbackQuery, session: AsyncSession):
+    """Генерирует PNG с турнирной таблицей — доступно игрокам и админу."""
+    from collections import Counter
+    from aiogram.types import BufferedInputFile
+    from app.utils.standings_image import generate_standings_image
+    from app.database.models import Team, TeamPlayer
+
+    await call.answer("🖼 Генерирую картинку...")
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        return
+
+    # Групповая таблица
+    matches_res = await session.execute(
+        select(Match)
+        .options(
+            selectinload(Match.team_home),
+            selectinload(Match.team_away),
+            selectinload(Match.goals).selectinload(Goal.player),
+        )
+        .where(Match.game_day_id == game_day_id)
+        .order_by(Match.id)
+    )
+    all_matches = matches_res.scalars().all()
+
+    stats: dict[int, dict] = {}
+    for m in all_matches:
+        if m.status != MatchStatus.FINISHED:
+            continue
+        if (m.match_stage or "group") != "group":
+            continue
+        for team, gf, ga in [
+            (m.team_home, m.score_home, m.score_away),
+            (m.team_away, m.score_away, m.score_home),
+        ]:
+            if team.id not in stats:
+                stats[team.id] = {
+                    "name": team.name, "emoji": team.color_emoji or "",
+                    "W": 0, "D": 0, "L": 0, "GF": 0, "GA": 0, "GP": 0,
+                }
+            s = stats[team.id]
+            s["GP"] += 1; s["GF"] += gf; s["GA"] += ga
+            if gf > ga: s["W"] += 1
+            elif gf == ga: s["D"] += 1
+            else: s["L"] += 1
+    for s in stats.values():
+        s["Pts"] = s["W"] * 3 + s["D"]
+    standings = sorted(stats.values(), key=lambda x: (-x["Pts"], -(x["GF"] - x["GA"]), -x["GF"]))
+
+    # Плей-офф матчи
+    playoff_stage_order = ["semifinal", "third_place", "final"]
+    playoff_matches = []
+    for m in all_matches:
+        stage = m.match_stage or "group"
+        if stage in playoff_stage_order:
+            playoff_matches.append({
+                "stage": stage,
+                "home": m.team_home.name[:12],
+                "away": m.team_away.name[:12],
+                "home_emoji": getattr(m.team_home, "color_emoji", ""),
+                "away_emoji": getattr(m.team_away, "color_emoji", ""),
+                "score_h": m.score_home,
+                "score_a": m.score_away,
+                "finished": m.status == MatchStatus.FINISHED,
+            })
+    playoff_matches.sort(key=lambda x: playoff_stage_order.index(x["stage"]))
+
+    # Бомбардиры
+    goal_counts: Counter = Counter()
+    for m in all_matches:
+        for g in m.goals:
+            if g.goal_type != GoalType.OWN_GOAL and g.player:
+                goal_counts[g.player.name] += 1
+    top_scorers = goal_counts.most_common(5)
+
+    date_str = game_day.scheduled_at.strftime("%d.%m.%Y")
+
+    loop = asyncio.get_event_loop()
+    img_bytes = await loop.run_in_executor(
+        None,
+        generate_standings_image,
+        game_day.display_name,
+        date_str,
+        standings,
+        playoff_matches,
+        top_scorers,
+    )
+
+    await call.message.answer_photo(
+        BufferedInputFile(img_bytes, filename="standings.png"),
+        caption=f"📊 {game_day.display_name} — {date_str}"
+    )

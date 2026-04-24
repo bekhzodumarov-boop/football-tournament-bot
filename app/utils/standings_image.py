@@ -1,30 +1,34 @@
 """
-Генерация PNG-картинки турнирной таблицы (Pillow).
-Показывает: групповой этап (таблица) + плей-офф (сетка матчей).
+Генерация PNG турнирной таблицы (Pillow).
+Секции: групповой этап, плей-офф, бомбардиры.
+Без эмодзи — только текст и цвет, корректно рендерится с DejaVu на Linux.
 """
 from __future__ import annotations
 import io
 from PIL import Image, ImageDraw, ImageFont
 
-# ─── Цвета ─────────────────────────────────────────────────────────────────
-BG          = (18, 18, 30)        # фон
-CARD        = (28, 28, 44)        # карточка секции
-HEADER_BG   = (40, 100, 180)      # шапка таблицы
-GOLD        = (255, 200,  50)
-SILVER      = (192, 192, 192)
-BRONZE      = (180, 100,  30)
-WHITE       = (255, 255, 255)
-GRAY        = (160, 160, 180)
-GREEN       = ( 60, 180,  80)
-RED_C       = (220,  60,  60)
-DRAW_C      = (200, 160,  50)
-DIVIDER     = ( 50,  50,  70)
+# ── Цвета ──────────────────────────────────────────────────────────────────
+BG          = (13,  17,  28)
+CARD        = (22,  28,  45)
+CARD_ALT    = (18,  24,  38)
+HEADER_BG   = (30,  80, 160)
+ACCENT      = (50, 120, 220)
+SECTION_HDR = (25,  35,  58)
+GOLD        = (255, 195,  40)
+SILVER      = (185, 195, 210)
+BRONZE      = (190, 120,  50)
+WHITE       = (240, 245, 255)
+GRAY        = (130, 145, 170)
+GREEN       = ( 55, 190,  90)
+RED_C       = (210,  65,  65)
+DRAW_C      = (200, 165,  50)
+DIVIDER     = ( 35,  45,  65)
 
 EMOJI_COLOR_MAP = {
-    "🔴": (220,  60,  60),
-    "🔵": ( 60, 100, 220),
-    "🟢": ( 60, 180,  80),
-    "🟡": (220, 200,  50),
+    "🔴": (210,  60,  60),
+    "🔵": ( 55, 110, 220),
+    "🟢": ( 55, 185,  85),
+    "🟡": (215, 185,  40),
     "🟠": (220, 130,  50),
     "⚪": (210, 210, 210),
     "⚫": (100, 100, 100),
@@ -39,25 +43,28 @@ EMOJI_COLOR_MAP = {
 
 def _team_color(emoji: str) -> tuple[int, int, int]:
     for e, c in EMOJI_COLOR_MAP.items():
-        if e in emoji:
+        if e in (emoji or ""):
             return c
-    return (120, 120, 150)
+    return (100, 110, 140)
 
 
 def _load_font(size: int, bold: bool = False):
-    """Попытка загрузить системный шрифт, fallback на дефолт Pillow."""
-    candidates = [
-        "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ]
+    candidates = []
     if bold:
         candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
             "C:/Windows/Fonts/segoeuib.ttf",
             "C:/Windows/Fonts/arialbd.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        ] + candidates
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+    else:
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ]
     for path in candidates:
         try:
             return ImageFont.truetype(path, size)
@@ -66,139 +73,177 @@ def _load_font(size: int, bold: bool = False):
     return ImageFont.load_default()
 
 
+def _section_header(d: ImageDraw.Draw, y: int, w: int, pad: int,
+                    text: str, fnt) -> int:
+    """Рисует заголовок секции, возвращает новый y."""
+    d.rounded_rectangle([pad, y, w - pad, y + 36], radius=8, fill=SECTION_HDR)
+    d.rounded_rectangle([pad, y, pad + 4, y + 36], radius=2, fill=ACCENT)
+    d.text((pad + 16, y + 18), text, font=fnt, fill=GOLD, anchor="lm")
+    return y + 36
+
+
 def generate_standings_image(
     game_day_name: str,
     game_day_date: str,
-    standings: list[dict],          # [{name, emoji, W, D, L, GF, GA, Pts, GP}]
-    playoff_matches: list[dict],    # [{stage, home, away, score_h, score_a, finished}]
-    top_scorers: list[tuple],       # [(name, count), ...]
+    standings: list[dict],        # [{name, emoji, W, D, L, GF, GA, Pts, GP}]
+    playoff_matches: list[dict],  # [{stage, home, away, score_h, score_a, finished}]
+    top_scorers: list[tuple],     # [(name, count), ...]
 ) -> bytes:
     """Генерирует PNG и возвращает bytes."""
 
-    W = 820
-    PAD = 24
-    ROW_H = 44
-    SECTION_GAP = 18
+    W   = 1000
+    PAD = 28
+    ROW = 52
+    GAP = 20
 
-    # ── Шрифты ─────────────────────────────────────────────────────────────
-    fnt_title  = _load_font(26, bold=True)
-    fnt_sub    = _load_font(18)
-    fnt_hdr    = _load_font(16, bold=True)
-    fnt_row    = _load_font(18)
-    fnt_bold   = _load_font(18, bold=True)
-    fnt_small  = _load_font(15)
+    fnt_title = _load_font(34, bold=True)
+    fnt_sub   = _load_font(19)
+    fnt_hdr   = _load_font(17, bold=True)
+    fnt_row   = _load_font(20)
+    fnt_bold  = _load_font(20, bold=True)
+    fnt_win   = _load_font(23, bold=True)   # T-036: победитель плей-офф
+    fnt_small = _load_font(17)
+    fnt_sec   = _load_font(16, bold=True)
 
-    # ── Предварительно считаем высоту ──────────────────────────────────────
-    section_heights = []
-    # заголовок
-    section_heights.append(70)
-    # таблица группового этапа
+    # ── Вычисляем высоту ──────────────────────────────────────────────────
+    H = PAD + 88  # заголовок
     if standings:
-        section_heights.append(SECTION_GAP + ROW_H + 2 + len(standings) * ROW_H)
-    # плей-офф
+        H += GAP + 40 + ROW + len(standings) * ROW
     if playoff_matches:
-        section_heights.append(SECTION_GAP + 30 + len(playoff_matches) * ROW_H)
-    # бомбардиры
+        H += GAP + 40 + len(playoff_matches) * ROW
     if top_scorers:
-        section_heights.append(SECTION_GAP + 30 + len(top_scorers[:5]) * 30)
-    # отступ снизу
-    section_heights.append(PAD)
+        H += GAP + 40 + len(top_scorers[:5]) * 36
+    H += PAD + 34  # подпись снизу
 
-    H = sum(section_heights) + PAD * 2
     img = Image.new("RGB", (W, H), BG)
-    d = ImageDraw.Draw(img)
+    d   = ImageDraw.Draw(img)
 
-    y = PAD
+    # Тонкая акцентная линия сверху
+    for i in range(3):
+        d.line([(0, i), (W, i)], fill=ACCENT)
 
-    # ── Заголовок ──────────────────────────────────────────────────────────
-    d.text((W // 2, y + 4), "🏆 " + game_day_name, font=fnt_title, fill=GOLD, anchor="mt")
-    y += 34
+    y = PAD + 8
+
+    # ── Заголовок ─────────────────────────────────────────────────────────
+    d.text((W // 2, y), game_day_name, font=fnt_title, fill=GOLD, anchor="mt")
+    y += 42
     d.text((W // 2, y), game_day_date, font=fnt_sub, fill=GRAY, anchor="mt")
-    y += 36
+    y += 38
 
-    # ── Групповой этап ─────────────────────────────────────────────────────
+    # ── Групповой этап ────────────────────────────────────────────────────
     if standings:
-        y += SECTION_GAP
-        d.rounded_rectangle([PAD, y, W - PAD, y + ROW_H], radius=8, fill=HEADER_BG)
-        cols = [
-            (PAD + 8,  "№"),
-            (PAD + 44, "Команда"),
-            (W - 260,  "И"),
-            (W - 220,  "В"),
-            (W - 180,  "Н"),
-            (W - 140,  "П"),
-            (W - 100,  "ГЗ"),
-            (W - 60,   "ГП"),
-            (W - PAD - 8, "О"),
-        ]
-        for cx, lbl in cols:
-            anchor = "lt" if lbl == "Команда" else ("rt" if cx == W - PAD - 8 else "mt")
-            d.text((cx, y + ROW_H // 2), lbl, font=fnt_hdr, fill=WHITE, anchor=anchor)
-        y += ROW_H
+        y += GAP
+        y = _section_header(d, y, W, PAD, "ГРУППОВОЙ ЭТАП", fnt_sec)
+        y += 4
 
-        place_colors = {1: GOLD, 2: SILVER, 3: BRONZE}
+        # Шапка таблицы
+        d.rounded_rectangle([PAD, y, W - PAD, y + ROW], radius=8, fill=HEADER_BG)
+        cols_x = [PAD+10, PAD+52, W-340, W-290, W-240, W-190, W-140, W-88, W-PAD-8]
+        cols_l = ["№",  "Команда", "И", "В", "Н", "П", "ГЗ", "ГП", "О"]
+        for cx, lbl in zip(cols_x, cols_l):
+            anc = "lm" if lbl in ("№", "Команда") else ("rm" if lbl == "О" else "mm")
+            d.text((cx, y + ROW // 2), lbl, font=fnt_hdr, fill=WHITE, anchor=anc)
+        y += ROW
+
+        place_clr = {1: GOLD, 2: SILVER, 3: BRONZE}
         for i, s in enumerate(standings, 1):
-            row_bg = (35, 35, 55) if i % 2 == 0 else CARD
-            d.rounded_rectangle([PAD, y, W - PAD, y + ROW_H - 2], radius=6, fill=row_bg)
+            bg = CARD if i % 2 else CARD_ALT
+            d.rounded_rectangle([PAD, y, W - PAD, y + ROW - 2], radius=6, fill=bg)
             tc = _team_color(s.get("emoji", ""))
-            d.rounded_rectangle([PAD, y, PAD + 5, y + ROW_H - 2], radius=3, fill=tc)
-            place_clr = place_colors.get(i, WHITE)
-            d.text((PAD + 8, y + ROW_H // 2), str(i), font=fnt_bold, fill=place_clr, anchor="lm")
-            name_short = s["name"][:16]
-            d.text((PAD + 44, y + ROW_H // 2), name_short, font=fnt_row, fill=WHITE, anchor="lm")
+            # Цветная полоска слева
+            d.rounded_rectangle([PAD, y + 4, PAD + 5, y + ROW - 6], radius=3, fill=tc)
+            # Место
+            pclr = place_clr.get(i, GRAY)
+            d.text((PAD + 10, y + ROW // 2), str(i), font=fnt_bold, fill=pclr, anchor="lm")
+            # Цветной кружок
+            cx0, cy0 = PAD + 38, y + ROW // 2
+            d.ellipse([cx0-10, cy0-10, cx0+10, cy0+10], fill=tc)
+            # Название команды
+            name_short = s["name"][:18]
+            d.text((PAD + 56, y + ROW // 2), name_short, font=fnt_row, fill=WHITE, anchor="lm")
+            # Статистика
             vals = [s["GP"], s["W"], s["D"], s["L"], s["GF"], s["GA"]]
-            xs   = [W - 260, W - 220, W - 180, W - 140, W - 100, W - 60]
+            xs   = [W-340, W-290, W-240, W-190, W-140, W-88]
             for cx, v in zip(xs, vals):
-                d.text((cx, y + ROW_H // 2), str(v), font=fnt_row, fill=GRAY, anchor="mm")
-            pts_clr = GREEN if i == 1 else (GOLD if i <= 2 else WHITE)
-            d.text((W - PAD - 8, y + ROW_H // 2), str(s["Pts"]), font=fnt_bold, fill=pts_clr, anchor="rm")
-            y += ROW_H
+                d.text((cx, y + ROW // 2), str(v), font=fnt_row, fill=GRAY, anchor="mm")
+            # Очки
+            pts_clr = GOLD if i == 1 else (SILVER if i == 2 else WHITE)
+            d.text((W - PAD - 8, y + ROW // 2), str(s["Pts"]), font=fnt_bold, fill=pts_clr, anchor="rm")
+            y += ROW
 
-    # ── Плей-офф ───────────────────────────────────────────────────────────
+    # ── Плей-офф ─────────────────────────────────────────────────────────
     if playoff_matches:
-        y += SECTION_GAP
-        d.text((PAD + 8, y + 6), "Плей-офф", font=fnt_hdr, fill=GOLD)
-        y += 30
+        y += GAP
+        y = _section_header(d, y, W, PAD, "ПЛЕЙ-ОФФ", fnt_sec)
+        y += 4
+
         stage_ru = {
             "semifinal":   "Полуфинал",
             "third_place": "За 3-е место",
             "final":       "Финал",
         }
         for m in playoff_matches:
-            row_bg = CARD
-            d.rounded_rectangle([PAD, y, W - PAD, y + ROW_H - 2], radius=6, fill=row_bg)
+            d.rounded_rectangle([PAD, y, W - PAD, y + ROW - 2], radius=6, fill=CARD)
             label = stage_ru.get(m["stage"], m["stage"])
-            d.text((PAD + 14, y + ROW_H // 2), label, font=fnt_small, fill=GRAY, anchor="lm")
-            score_str = f"{m['score_h']}:{m['score_a']}"
-            center_x = W // 2
-            if m["finished"]:
-                if m["score_h"] > m["score_a"]:
-                    home_clr, away_clr = GREEN, RED_C
-                elif m["score_h"] < m["score_a"]:
-                    home_clr, away_clr = RED_C, GREEN
-                else:
-                    home_clr = away_clr = DRAW_C
+            d.text((PAD + 14, y + ROW // 2), label, font=fnt_small, fill=GRAY, anchor="lm")
+
+            cx = W // 2
+            finished = m.get("finished", False)
+            sh, sa = m["score_h"], m["score_a"]
+
+            # T-036: цвет по эмодзи команды, победитель — bold+крупный, проигравший — тусклый
+            home_clr = _team_color(m.get("home_emoji", ""))
+            away_clr = _team_color(m.get("away_emoji", ""))
+
+            def _dim(c: tuple) -> tuple:
+                return (int(c[0]*0.55), int(c[1]*0.55), int(c[2]*0.55))
+
+            if finished:
+                if sh > sa:
+                    hc, ac = home_clr, _dim(away_clr)
+                    hf, af = fnt_win, fnt_small
+                elif sh < sa:
+                    hc, ac = _dim(home_clr), away_clr
+                    hf, af = fnt_small, fnt_win
+                else:  # ничья
+                    hc, ac = home_clr, away_clr
+                    hf = af = fnt_bold
             else:
-                home_clr = away_clr = GRAY
-            d.text((center_x - 10, y + ROW_H // 2), m["home"], font=fnt_bold, fill=home_clr, anchor="rm")
-            d.text((center_x, y + ROW_H // 2), score_str, font=fnt_bold, fill=WHITE, anchor="mm")
-            d.text((center_x + 10, y + ROW_H // 2), m["away"], font=fnt_bold, fill=away_clr, anchor="lm")
-            y += ROW_H
+                hc = ac = GRAY
+                hf = af = fnt_bold
 
-    # ── Бомбардиры ─────────────────────────────────────────────────────────
+            home = m["home"][:14]
+            away = m["away"][:14]
+            score = f"  {sh} : {sa}  "
+            d.text((cx - 80, y + ROW // 2), home,  font=hf,       fill=hc,    anchor="rm")
+            d.text((cx,      y + ROW // 2), score, font=fnt_bold,  fill=WHITE, anchor="mm")
+            d.text((cx + 80, y + ROW // 2), away,  font=af,        fill=ac,    anchor="lm")
+            y += ROW
+
+    # ── Бомбардиры ───────────────────────────────────────────────────────
     if top_scorers:
-        y += SECTION_GAP
-        d.text((PAD + 8, y + 4), "⚽ Лучшие бомбардиры", font=fnt_hdr, fill=WHITE)
-        y += 30
-        medals_clr = [GOLD, SILVER, BRONZE, WHITE, WHITE]
-        for i, (name, cnt) in enumerate(top_scorers[:5]):
-            clr = medals_clr[i]
-            text = f"{i+1}. {name} — {cnt} гол{'а' if 2<=cnt<=4 else ('ов' if cnt>=5 else '')}"
-            d.text((PAD + 14, y + 8), text, font=fnt_row, fill=clr)
-            y += 30
+        y += GAP
+        y = _section_header(d, y, W, PAD, "БОМБАРДИРЫ", fnt_sec)
+        y += 6
 
-    # ── Нижняя подпись ─────────────────────────────────────────────────────
-    d.text((W // 2, H - 14), "@football_manager_uz_bot", font=fnt_small, fill=GRAY, anchor="mb")
+        medals_txt = ["1.", "2.", "3.", "4.", "5."]
+        medals_clr = [GOLD, SILVER, BRONZE, WHITE, WHITE]
+
+        for i, (name, cnt) in enumerate(top_scorers[:5]):
+            bg = CARD if i % 2 == 0 else CARD_ALT
+            d.rounded_rectangle([PAD, y, W - PAD, y + 34], radius=6, fill=bg)
+            clr = medals_clr[i]
+            d.text((PAD + 14, y + 17), medals_txt[i], font=fnt_bold, fill=clr, anchor="lm")
+            d.text((PAD + 52, y + 17), name,          font=fnt_row,  fill=WHITE, anchor="lm")
+            suffix = "гол" if cnt == 1 else ("гола" if 2 <= cnt <= 4 else "голов")
+            d.text((W - PAD - 12, y + 17), f"{cnt} {suffix}", font=fnt_bold, fill=clr, anchor="rm")
+            y += 34
+
+    # ── Подпись ──────────────────────────────────────────────────────────
+    y += 14
+    d.line([(PAD, y), (W - PAD, y)], fill=DIVIDER, width=1)
+    y += 12
+    d.text((W // 2, y + 8), "@football_manager_uz_bot", font=fnt_small, fill=GRAY, anchor="mt")
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
