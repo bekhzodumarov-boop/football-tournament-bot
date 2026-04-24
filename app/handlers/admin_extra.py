@@ -4072,7 +4072,8 @@ async def league_password_delete(call: CallbackQuery, session: AsyncSession):
 #  РЕДАКТИРОВАНИЕ РЕЗУЛЬТАТОВ МАТЧЕЙ (Task 20)
 # ══════════════════════════════════════════════════════
 
-def _edit_match_kb(match_id: int, game_day_id: int, goals: list) -> "InlineKeyboardMarkup":
+def _edit_match_kb(match_id: int, game_day_id: int, goals: list,
+                   is_finished: bool = True) -> "InlineKeyboardMarkup":
     """Клавиатура редактирования матча."""
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -4088,8 +4089,59 @@ def _edit_match_kb(match_id: int, game_day_id: int, goals: list) -> "InlineKeybo
         builder.row(
             InlineKeyboardButton(text="🗑 Удалить гол", callback_data=f"adm_del_goal_list:{match_id}"),
         )
+    if not is_finished:
+        builder.row(
+            InlineKeyboardButton(
+                text="✅ Завершить матч",
+                callback_data=f"adm_finish_match:{match_id}:{game_day_id}"
+            )
+        )
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"adm_edit_matches:{game_day_id}"))
     return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("adm_finish_match:"))
+async def adm_finish_match(call: CallbackQuery, session: AsyncSession):
+    """Принудительно завершает матч (переводит в FINISHED)."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    match_id = int(parts[1])
+    game_day_id = int(parts[2])
+
+    match = await session.get(Match, match_id, options=[
+        selectinload(Match.team_home),
+        selectinload(Match.team_away),
+        selectinload(Match.goals).selectinload(Goal.player),
+    ])
+    if not match:
+        await call.answer("❌ Матч не найден.", show_alert=True)
+        return
+
+    match.status = MatchStatus.FINISHED
+    await session.commit()
+    await call.answer("✅ Матч завершён")
+
+    # Перерисовываем экран редактирования
+    home = match.team_home.name
+    away = match.team_away.name
+    lines = [
+        f"✏️ <b>Редактирование матча</b>",
+        f"⚽ {home}  <b>{match.score_home}:{match.score_away}</b>  {away}",
+        "",
+        "Голы:",
+    ]
+    for i, g in enumerate(match.goals, 1):
+        team_name = home if g.team_id == match.team_home_id else away
+        own = " (авт.)" if g.goal_type == GoalType.OWN_GOAL else ""
+        lines.append(f"  {i}. ⚽ {g.player.name}{own} [{team_name}]")
+
+    await call.message.edit_text(
+        "\n".join(lines),
+        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals, is_finished=True)
+    )
 
 
 @router.callback_query(F.data.startswith("adm_edit_matches:"))
@@ -4171,7 +4223,7 @@ async def adm_edit_match(call: CallbackQuery, session: AsyncSession):
 
     await call.message.edit_text(
         "\n".join(lines),
-        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals)
+        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals, is_finished=match.status == MatchStatus.FINISHED)
     )
 
 
@@ -4236,7 +4288,7 @@ async def adm_score_adjust(call: CallbackQuery, session: AsyncSession):
     await call.answer(f"✅ Счёт: {match.score_home}:{match.score_away}")
     await call.message.edit_text(
         "\n".join(lines),
-        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals)
+        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals, is_finished=match.status == MatchStatus.FINISHED)
     )
 
 
@@ -4388,7 +4440,7 @@ async def adm_add_goal_save(call: CallbackQuery, session: AsyncSession):
 
     await call.message.edit_text(
         "\n".join(lines),
-        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals)
+        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals, is_finished=match.status == MatchStatus.FINISHED)
     )
 
 
@@ -4497,5 +4549,5 @@ async def adm_del_goal(call: CallbackQuery, session: AsyncSession):
 
     await call.message.edit_text(
         "\n".join(lines),
-        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals)
+        reply_markup=_edit_match_kb(match_id, game_day_id, match.goals, is_finished=match.status == MatchStatus.FINISHED)
     )
