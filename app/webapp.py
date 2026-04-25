@@ -55,8 +55,8 @@ _HTML = """<!DOCTYPE html>
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-size: 14px;
-    padding: 12px;
     min-height: 100vh;
+    padding-bottom: 64px;
   }
   h2 { font-size: 17px; font-weight: 700; margin-bottom: 4px; }
   .subtitle { color: var(--hint); font-size: 12px; margin-bottom: 16px; }
@@ -194,24 +194,147 @@ _HTML = """<!DOCTYPE html>
   }
   .profile-stat-val { font-size: 20px; font-weight: 800; color: var(--accent); }
   .profile-stat-lbl { font-size: 10px; color: var(--hint); margin-top: 2px; }
+
+  /* ── Tabs ── */
+  .tab { display: none; padding: 12px; }
+  .tab.active { display: block; }
+
+  /* ── Bottom nav ── */
+  .bottom-nav {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: var(--bg2); border-top: 1px solid var(--border);
+    display: flex; height: 60px; z-index: 50;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+  .nav-btn {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 3px;
+    background: none; border: none; color: var(--hint);
+    font-size: 10px; font-weight: 600; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .nav-icon { font-size: 22px; line-height: 1; }
+  .nav-btn.active { color: var(--accent); }
+
+  /* ── Attend tab ── */
+  .attend-card {
+    background: var(--bg2); border-radius: 14px; padding: 16px; margin: 12px 0;
+  }
+  .attend-date { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+  .attend-loc { color: var(--hint); font-size: 13px; margin-bottom: 10px; }
+  .attend-row { font-size: 13px; color: var(--hint); margin-bottom: 4px; }
+  .attend-row b { color: var(--text); }
+  .attend-status {
+    text-align: center; padding: 12px; border-radius: 12px;
+    font-weight: 600; font-size: 15px; margin: 8px 0;
+  }
+  .attend-status.confirmed { background: rgba(48,209,88,0.12); color: var(--accent); }
+  .attend-status.late { background: rgba(255,159,10,0.12); color: #ff9f0a; }
+  .attend-status.declined { background: rgba(255,69,58,0.1); color: #ff453a; }
+  .attend-status.waitlist { background: rgba(255,159,10,0.1); color: #ff9f0a; }
+  .attend-status.closed { background: rgba(255,255,255,0.06); color: var(--hint); }
+  .attend-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+  .attend-btn {
+    width: 100%; min-height: 52px; border: none; border-radius: 14px;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .attend-btn.primary { background: var(--accent); color: #fff; }
+  .attend-btn.secondary {
+    background: var(--bg2); color: var(--text); border: 1px solid var(--border);
+  }
+  .attend-btn.danger {
+    background: rgba(255,69,58,0.15); color: #ff453a;
+    border: 1px solid rgba(255,69,58,0.3);
+  }
+
+  /* ── Team tab ── */
+  .team-header { font-size: 20px; font-weight: 800; margin: 12px 0 14px; }
+  .team-roster { background: var(--bg2); border-radius: 12px; overflow: hidden; }
+  .team-player {
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    font-size: 14px; font-weight: 600;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .team-player:last-child { border-bottom: none; }
+  .team-player.me { color: var(--accent); }
+  .player-pos { font-size: 12px; color: var(--hint); font-weight: 400; }
+  .next-match-card {
+    background: var(--bg2); border-radius: 12px; padding: 14px 16px;
+    margin-top: 12px; border: 1px solid var(--border);
+  }
+  .next-match-lbl {
+    font-size: 11px; color: var(--hint); text-transform: uppercase;
+    letter-spacing: 0.5px; margin-bottom: 6px;
+  }
+  .next-match-vs { font-size: 15px; font-weight: 700; }
 </style>
 </head>
 <body>
-<div id="app"><div class="empty">Загрузка…</div></div>
+
+<!-- Tabs -->
+<div class="tab active" id="tab-standings">
+  <div id="app"><div class="empty">Загрузка…</div></div>
+</div>
+<div class="tab" id="tab-attend">
+  <div id="app-attend"><div class="empty">Загрузка…</div></div>
+</div>
+<div class="tab" id="tab-team">
+  <div id="app-team"><div class="empty">Загрузка…</div></div>
+</div>
+<div class="tab" id="tab-profile">
+  <div id="app-profile"><div class="empty">Загрузка…</div></div>
+</div>
+
+<!-- Bottom nav -->
+<nav class="bottom-nav">
+  <button class="nav-btn active" id="nav-standings" onclick="switchTab('standings')">
+    <span class="nav-icon">🏆</span><span>Таблица</span>
+  </button>
+  <button class="nav-btn" id="nav-attend" onclick="switchTab('attend')">
+    <span class="nav-icon">📋</span><span>Запись</span>
+  </button>
+  <button class="nav-btn" id="nav-team" onclick="switchTab('team')">
+    <span class="nav-icon">👥</span><span>Команда</span>
+  </button>
+  <button class="nav-btn" id="nav-profile" onclick="switchTab('profile')">
+    <span class="nav-icon">👤</span><span>Профиль</span>
+  </button>
+</nav>
 
 <script>
 Telegram.WebApp.ready();
 Telegram.WebApp.expand();
 
-let countdown = 30;
 const tgUser = (Telegram.WebApp.initDataUnsafe || {}).user || null;
+const tgParam = tgUser ? '?tg_id=' + tgUser.id : '';
 
-async function load() {
+// ── Tab switching ─────────────────────────────
+const TAB_NAMES = ['standings', 'attend', 'team', 'profile'];
+const loadedTabs = {};
+
+function switchTab(name) {
+  TAB_NAMES.forEach(t => {
+    document.getElementById('tab-' + t).classList.toggle('active', t === name);
+    document.getElementById('nav-' + t).classList.toggle('active', t === name);
+  });
+  if (!loadedTabs[name]) {
+    loadedTabs[name] = true;
+    if (name === 'standings') loadStandings();
+    else if (name === 'attend') loadAttend();
+    else if (name === 'team') loadTeam();
+    else if (name === 'profile') loadProfile();
+  }
+}
+
+// ── Standings tab ─────────────────────────────
+let countdown = 30;
+
+async function loadStandings() {
   try {
-    const tgParam = tgUser ? '?tg_id=' + tgUser.id : '';
     const r = await fetch('/api/standings' + tgParam);
     const d = await r.json();
-    render(d);
+    renderStandings(d);
     countdown = 30;
   } catch(e) {
     document.getElementById('app').innerHTML =
@@ -224,7 +347,7 @@ const STAGE_NAMES = {
   third_place: 'За 3-е место', final: 'Финал',
 };
 
-function render(d) {
+function renderStandings(d) {
   const app = document.getElementById('app');
   let html = '';
 
@@ -355,34 +478,6 @@ function render(d) {
     html += '</div>';
   }
 
-  // ── W-5: Профиль игрока ───────────────────────
-  if (d.player_stats) {
-    const ps = d.player_stats;
-    html += `<div class="section"><div class="section-title">👤 Мои показатели</div>
-    <div class="profile-card">
-      <div class="profile-name">${ps.name}</div>
-      <div class="profile-sub">${ps.team_emoji ? ps.team_emoji + ' ' : ''}${ps.position || ''}</div>
-      <div class="profile-stats">
-        <div class="profile-stat">
-          <div class="profile-stat-val">${ps.goals}</div>
-          <div class="profile-stat-lbl">Голов</div>
-        </div>
-        <div class="profile-stat">
-          <div class="profile-stat-val">${ps.games}</div>
-          <div class="profile-stat-lbl">Игр</div>
-        </div>
-        <div class="profile-stat">
-          <div class="profile-stat-val">${ps.wins}</div>
-          <div class="profile-stat-lbl">Побед</div>
-        </div>
-        <div class="profile-stat">
-          <div class="profile-stat-val">${ps.yellow_cards > 0 ? '🟨' + ps.yellow_cards : ps.red_cards > 0 ? '🟥' + ps.red_cards : '—'}</div>
-          <div class="profile-stat-lbl">Карточки</div>
-        </div>
-      </div>
-    </div></div>`;
-  }
-
   // Refresh indicator
   html += `<div class="refresh-bar"><div class="dot"></div>
     <span id="countdown">Обновление через ${countdown} сек.</span></div>`;
@@ -395,10 +490,210 @@ setInterval(() => {
   const el = document.getElementById('countdown');
   if (el) el.textContent = `Обновление через ${countdown} сек.`;
 }, 1000);
+// Auto-refresh — только когда активен таб standings
+setInterval(() => {
+  if (document.getElementById('tab-standings').classList.contains('active')) {
+    loadStandings();
+  }
+}, 30000);
 
-// Auto-refresh every 30 seconds
-setInterval(load, 30000);
-load();
+// ── Attend tab ────────────────────────────────
+async function loadAttend() {
+  const el = document.getElementById('app-attend');
+  el.innerHTML = '<div class="empty">Загрузка…</div>';
+  if (!tgUser) {
+    el.innerHTML = '<div class="empty">Открой через Telegram для записи на игру.</div>';
+    return;
+  }
+  try {
+    const r = await fetch('/api/player/upcoming' + tgParam);
+    const d = await r.json();
+    renderAttend(d);
+  } catch(e) {
+    el.innerHTML = '<div class="empty">⚠️ Ошибка загрузки.</div>';
+  }
+}
+
+function renderAttend(d) {
+  const el = document.getElementById('app-attend');
+  let html = '<h2>📋 Запись на игру</h2>';
+
+  if (!d.game_day) {
+    html += '<div class="empty" style="margin-top:24px">Ближайшая игра не запланирована.</div>';
+    el.innerHTML = html;
+    return;
+  }
+
+  const gd = d.game_day;
+  html += `<div class="attend-card">
+    <div class="attend-date">📅 ${gd.date} · ${gd.time}</div>
+    <div class="attend-loc">📍 ${gd.location}</div>`;
+  if (gd.cost) html += `<div class="attend-row">💰 Взнос: <b>${gd.cost} сум</b></div>`;
+  html += `<div class="attend-row">👥 Записалось: <b>${gd.confirmed} / ${gd.player_limit}</b></div>`;
+  if (gd.waitlist > 0) html += `<div class="attend-row">⏳ Лист ожидания: <b>${gd.waitlist}</b></div>`;
+  html += '</div>';
+
+  if (d.waitlist_pos) {
+    html += `<div class="attend-status waitlist">⏳ Ты в листе ожидания — позиция #${d.waitlist_pos}</div>`;
+  }
+
+  if (!gd.registration_open) {
+    html += '<div class="attend-status closed">🔒 Регистрация ещё не открыта</div>';
+  } else if (d.status === 'yes') {
+    html += '<div class="attend-status confirmed">✅ Ты записан!</div>';
+    html += `<div class="attend-actions">
+      <button class="attend-btn secondary" onclick="attend(${gd.id},'late')">⏰ Опаздываю</button>
+      <button class="attend-btn danger" onclick="attend(${gd.id},'no')">❌ Не пойду</button>
+    </div>`;
+  } else if (d.status === 'late') {
+    html += '<div class="attend-status late">⏰ Ты записан, но опоздаешь</div>';
+    html += `<div class="attend-actions">
+      <button class="attend-btn primary" onclick="attend(${gd.id},'yes')">✅ Приду вовремя</button>
+      <button class="attend-btn danger" onclick="attend(${gd.id},'no')">❌ Не пойду</button>
+    </div>`;
+  } else if (d.status === 'no') {
+    html += '<div class="attend-status declined">❌ Ты отказался</div>';
+    html += `<div class="attend-actions">
+      <button class="attend-btn primary" onclick="attend(${gd.id},'yes')">✅ Всё-таки приду</button>
+    </div>`;
+  } else if (d.status === 'waitlist') {
+    html += `<div class="attend-actions">
+      <button class="attend-btn danger" onclick="attend(${gd.id},'no')">❌ Выйти из листа</button>
+    </div>`;
+  } else {
+    if (gd.is_full) {
+      html += '<div class="attend-status closed">⚠️ Мест нет — запись в лист ожидания</div>';
+      html += `<div class="attend-actions">
+        <button class="attend-btn secondary" onclick="attend(${gd.id},'yes')">⏳ В лист ожидания</button>
+      </div>`;
+    } else {
+      html += `<div class="attend-actions">
+        <button class="attend-btn primary" onclick="attend(${gd.id},'yes')">✅ Записаться</button>
+        <button class="attend-btn secondary" onclick="attend(${gd.id},'late')">⏰ Опаздываю</button>
+        <button class="attend-btn danger" onclick="attend(${gd.id},'no')">❌ Не пойду</button>
+      </div>`;
+    }
+  }
+
+  el.innerHTML = html;
+}
+
+async function attend(gameDayId, response) {
+  if (!tgUser) return;
+  try {
+    const r = await fetch('/api/player/attend' + tgParam, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ game_day_id: gameDayId, response }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      loadedTabs['attend'] = false;
+      await loadAttend();
+      loadedTabs['attend'] = true;
+    } else {
+      Telegram.WebApp.showAlert(d.error || 'Ошибка');
+    }
+  } catch(e) {
+    Telegram.WebApp.showAlert('Ошибка сети');
+  }
+}
+
+// ── Team tab ──────────────────────────────────
+async function loadTeam() {
+  const el = document.getElementById('app-team');
+  el.innerHTML = '<div class="empty">Загрузка…</div>';
+  if (!tgUser) {
+    el.innerHTML = '<div class="empty">Открой через Telegram.</div>';
+    return;
+  }
+  try {
+    const r = await fetch('/api/player/team' + tgParam);
+    const d = await r.json();
+    renderTeam(d);
+  } catch(e) {
+    el.innerHTML = '<div class="empty">⚠️ Ошибка загрузки.</div>';
+  }
+}
+
+function renderTeam(d) {
+  const el = document.getElementById('app-team');
+  let html = '<h2>👥 Моя команда</h2>';
+  if (!d.team) {
+    html += '<div class="empty" style="margin-top:24px">Команды ещё не определены.<br>Возвращайся после жеребьёвки!</div>';
+    el.innerHTML = html;
+    return;
+  }
+  const t = d.team;
+  html += `<div class="team-header">${t.emoji} ${t.name}</div>`;
+  html += '<div class="team-roster">';
+  for (const p of (t.players || [])) {
+    const me = p.is_me ? ' me' : '';
+    const pos = p.position ? `<span class="player-pos">${p.position}</span>` : '';
+    const youTag = p.is_me ? ' <span style="font-size:11px;color:var(--accent);">(это ты)</span>' : '';
+    html += `<div class="team-player${me}">${p.name}${youTag}${pos}</div>`;
+  }
+  html += '</div>';
+  if (d.next_match) {
+    const nm = d.next_match;
+    html += `<div class="next-match-card">
+      <div class="next-match-lbl">🕓 Следующий матч</div>
+      <div class="next-match-vs">${nm.home_emoji} ${nm.home} — ${nm.away_emoji} ${nm.away}</div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+// ── Profile tab ───────────────────────────────
+async function loadProfile() {
+  const el = document.getElementById('app-profile');
+  el.innerHTML = '<div class="empty">Загрузка…</div>';
+  if (!tgUser) {
+    el.innerHTML = '<div class="empty">Открой через Telegram для просмотра профиля.</div>';
+    return;
+  }
+  try {
+    const r = await fetch('/api/player/profile' + tgParam);
+    const d = await r.json();
+    renderProfile(d);
+  } catch(e) {
+    el.innerHTML = '<div class="empty">⚠️ Ошибка загрузки.</div>';
+  }
+}
+
+function renderProfile(d) {
+  const el = document.getElementById('app-profile');
+  let html = '<h2>👤 Мой профиль</h2>';
+  if (!d.player) {
+    html += '<div class="empty" style="margin-top:24px">Профиль не найден.<br>Зарегистрируйся через /start в боте.</div>';
+    el.innerHTML = html;
+    return;
+  }
+  const p = d.player;
+  html += `<div class="profile-card">
+    <div class="profile-name">${p.name}</div>
+    <div class="profile-sub">${p.position || ''}</div>
+    <div class="profile-stats">
+      <div class="profile-stat"><div class="profile-stat-val">${p.goals_total}</div><div class="profile-stat-lbl">Голов</div></div>
+      <div class="profile-stat"><div class="profile-stat-val">${p.games_total}</div><div class="profile-stat-lbl">Игр</div></div>
+      <div class="profile-stat"><div class="profile-stat-val">${p.wins_total}</div><div class="profile-stat-lbl">Побед</div></div>
+      <div class="profile-stat"><div class="profile-stat-val">${p.rating || '—'}</div><div class="profile-stat-lbl">Рейтинг</div></div>
+    </div>
+  </div>`;
+  if (p.yellow_cards_total > 0 || p.red_cards_total > 0) {
+    html += `<div class="profile-card" style="margin-top:8px;font-size:14px;">
+      <div style="display:flex;gap:20px;">
+        <span>🟨 <b>${p.yellow_cards_total}</b> ЖК</span>
+        <span>🟥 <b>${p.red_cards_total}</b> КК</span>
+      </div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+// ── Init ──────────────────────────────────────
+loadedTabs['standings'] = true;
+loadStandings();
 </script>
 </body>
 </html>"""
@@ -608,6 +903,321 @@ async def api_standings(request: web.Request) -> web.Response:
             "top_scorers": top_scorers,
             "playoff": playoff,
             "player_stats": player_stats,
+        })
+
+
+async def api_player_upcoming(request: web.Request) -> web.Response:
+    """GET /api/player/upcoming?tg_id=X — ближайшая игра + статус записи"""
+    tg_id_str = request.rel_url.query.get("tg_id")
+    if not tg_id_str or not tg_id_str.isdigit():
+        return web.json_response({"game_day": None, "status": "none", "waitlist_pos": None})
+    tg_id = int(tg_id_str)
+
+    async with AsyncSessionFactory() as session:
+        p_res = await session.execute(select(Player).where(Player.telegram_id == tg_id))
+        player = p_res.scalar_one_or_none()
+
+        league_id = player.league_id if player else None
+        gd_query = (
+            select(GameDay)
+            .where(GameDay.status.in_([
+                GameDayStatus.ANNOUNCED, GameDayStatus.CLOSED, GameDayStatus.IN_PROGRESS,
+            ]))
+            .order_by(GameDay.scheduled_at.asc())
+            .limit(1)
+        )
+        if league_id:
+            gd_query = gd_query.where(GameDay.league_id == league_id)
+        gd_res = await session.execute(gd_query)
+        game_day = gd_res.scalar_one_or_none()
+
+        if not game_day:
+            return web.json_response({"game_day": None, "status": "none", "waitlist_pos": None})
+
+        confirmed_res = await session.execute(
+            select(Attendance).where(
+                Attendance.game_day_id == game_day.id,
+                Attendance.response == AttendanceResponse.YES,
+            )
+        )
+        confirmed = len(confirmed_res.scalars().all())
+
+        wl_res = await session.execute(
+            select(Attendance).where(
+                Attendance.game_day_id == game_day.id,
+                Attendance.response == AttendanceResponse.WAITLIST,
+            )
+        )
+        waitlist_all = wl_res.scalars().all()
+
+        status = "none"
+        waitlist_pos = None
+        if player:
+            att_res = await session.execute(
+                select(Attendance).where(
+                    Attendance.game_day_id == game_day.id,
+                    Attendance.player_id == player.id,
+                )
+            )
+            att = att_res.scalar_one_or_none()
+            if att:
+                if att.response == AttendanceResponse.YES:
+                    status = "late" if getattr(att, "is_late", False) else "yes"
+                elif att.response == AttendanceResponse.NO:
+                    status = "no"
+                elif att.response == AttendanceResponse.WAITLIST:
+                    status = "waitlist"
+                    for i, a in enumerate(sorted(waitlist_all, key=lambda x: x.id), 1):
+                        if a.player_id == player.id:
+                            waitlist_pos = i
+                            break
+
+        player_limit = game_day.player_limit or 20
+        return web.json_response({
+            "game_day": {
+                "id": game_day.id,
+                "date": game_day.scheduled_at.strftime("%d.%m.%Y"),
+                "time": game_day.scheduled_at.strftime("%H:%M"),
+                "location": game_day.location or "",
+                "cost": game_day.cost or 0,
+                "player_limit": player_limit,
+                "confirmed": confirmed,
+                "waitlist": len(waitlist_all),
+                "registration_open": getattr(game_day, "registration_open", True),
+                "is_full": confirmed >= player_limit,
+            },
+            "status": status,
+            "waitlist_pos": waitlist_pos,
+        })
+
+
+async def api_player_attend(request: web.Request) -> web.Response:
+    """POST /api/player/attend?tg_id=X — записаться/отказаться/опаздываю"""
+    tg_id_str = request.rel_url.query.get("tg_id")
+    if not tg_id_str or not tg_id_str.isdigit():
+        return web.json_response({"ok": False, "error": "Не авторизован"})
+    tg_id = int(tg_id_str)
+
+    body = await request.json()
+    game_day_id = int(body["game_day_id"])
+    response_str = body.get("response", "no")  # 'yes' | 'late' | 'no'
+
+    async with AsyncSessionFactory() as session:
+        p_res = await session.execute(select(Player).where(Player.telegram_id == tg_id))
+        player = p_res.scalar_one_or_none()
+        if not player:
+            return web.json_response({"ok": False, "error": "Игрок не найден. Зарегистрируйся через /start"})
+
+        gd = await session.get(GameDay, game_day_id)
+        if not gd:
+            return web.json_response({"ok": False, "error": "Игровой день не найден"})
+
+        if not getattr(gd, "registration_open", True):
+            return web.json_response({"ok": False, "error": "Регистрация ещё не открыта"})
+
+        is_late = response_str == "late"
+        if response_str in ("yes", "late"):
+            # Проверяем не переполнен ли список (без учёта текущего игрока)
+            conf_res = await session.execute(
+                select(Attendance).where(
+                    Attendance.game_day_id == game_day_id,
+                    Attendance.response == AttendanceResponse.YES,
+                    Attendance.player_id != player.id,
+                )
+            )
+            confirmed = len(conf_res.scalars().all())
+            player_limit = gd.player_limit or 20
+            if confirmed >= player_limit:
+                att_response = AttendanceResponse.WAITLIST
+                is_late = False
+            else:
+                att_response = AttendanceResponse.YES
+        else:
+            att_response = AttendanceResponse.NO
+
+        att_res = await session.execute(
+            select(Attendance).where(
+                Attendance.game_day_id == game_day_id,
+                Attendance.player_id == player.id,
+            )
+        )
+        att = att_res.scalar_one_or_none()
+        if att:
+            att.response = att_response
+            att.is_late = is_late
+        else:
+            session.add(Attendance(
+                game_day_id=game_day_id,
+                player_id=player.id,
+                response=att_response,
+                is_late=is_late,
+            ))
+        await session.commit()
+        return web.json_response({"ok": True})
+
+
+async def api_player_team(request: web.Request) -> web.Response:
+    """GET /api/player/team?tg_id=X — команда игрока на ближайший игровой день"""
+    tg_id_str = request.rel_url.query.get("tg_id")
+    if not tg_id_str or not tg_id_str.isdigit():
+        return web.json_response({"team": None, "next_match": None})
+    tg_id = int(tg_id_str)
+
+    async with AsyncSessionFactory() as session:
+        p_res = await session.execute(select(Player).where(Player.telegram_id == tg_id))
+        player = p_res.scalar_one_or_none()
+        if not player:
+            return web.json_response({"team": None, "next_match": None})
+
+        # Ближайший активный игровой день
+        gd_res = await session.execute(
+            select(GameDay)
+            .where(
+                GameDay.status.in_([
+                    GameDayStatus.ANNOUNCED, GameDayStatus.CLOSED, GameDayStatus.IN_PROGRESS,
+                ]),
+                GameDay.league_id == player.league_id,
+            )
+            .order_by(GameDay.scheduled_at.asc())
+            .limit(1)
+        )
+        game_day = gd_res.scalar_one_or_none()
+        if not game_day:
+            return web.json_response({"team": None, "next_match": None})
+
+        # Найти команду игрока
+        from app.database.models import TeamPlayer as TP
+        tp_res = await session.execute(
+            select(TP)
+            .join(Team, TP.team_id == Team.id)
+            .options(
+                selectinload(TP.team).selectinload(Team.players).selectinload(TP.player)
+            )
+            .where(
+                TP.player_id == player.id,
+                Team.game_day_id == game_day.id,
+            )
+        )
+        tp = tp_res.scalar_one_or_none()
+        if not tp or not tp.team:
+            return web.json_response({"team": None, "next_match": None})
+
+        team = tp.team
+        # Перезагрузить команду с игроками
+        team_res = await session.execute(
+            select(Team)
+            .options(selectinload(Team.players).selectinload(TeamPlayer.player))
+            .where(Team.id == team.id)
+        )
+        team = team_res.scalar_one_or_none()
+
+        players_data = [
+            {
+                "name": tp2.player.name,
+                "position": getattr(tp2.player, "position", "") or "",
+                "is_me": tp2.player.id == player.id,
+            }
+            for tp2 in (team.players or [])
+            if tp2.player
+        ]
+
+        # Следующий матч для этой команды
+        match_res = await session.execute(
+            select(Match)
+            .options(selectinload(Match.team_home), selectinload(Match.team_away))
+            .where(
+                Match.game_day_id == game_day.id,
+                Match.status == MatchStatus.SCHEDULED,
+                (Match.team_home_id == team.id) | (Match.team_away_id == team.id),
+            )
+            .order_by(Match.match_order, Match.id)
+            .limit(1)
+        )
+        next_match = match_res.scalar_one_or_none()
+        next_match_data = None
+        if next_match:
+            next_match_data = {
+                "home": next_match.team_home.name,
+                "home_emoji": next_match.team_home.color_emoji or "",
+                "away": next_match.team_away.name,
+                "away_emoji": next_match.team_away.color_emoji or "",
+            }
+
+        return web.json_response({
+            "team": {
+                "name": team.name,
+                "emoji": team.color_emoji or "",
+                "players": players_data,
+            },
+            "next_match": next_match_data,
+        })
+
+
+async def api_player_profile(request: web.Request) -> web.Response:
+    """GET /api/player/profile?tg_id=X — полная статистика игрока"""
+    tg_id_str = request.rel_url.query.get("tg_id")
+    if not tg_id_str or not tg_id_str.isdigit():
+        return web.json_response({"player": None})
+    tg_id = int(tg_id_str)
+
+    async with AsyncSessionFactory() as session:
+        p_res = await session.execute(select(Player).where(Player.telegram_id == tg_id))
+        player = p_res.scalar_one_or_none()
+        if not player:
+            return web.json_response({"player": None})
+
+        # Всего голов (не автоголы)
+        goals_res = await session.execute(
+            select(Goal).where(
+                Goal.player_id == player.id,
+                Goal.goal_type != GoalType.OWN_GOAL,
+            )
+        )
+        goals_total = len(goals_res.scalars().all())
+
+        # Карточки
+        cards_res = await session.execute(select(Card).where(Card.player_id == player.id))
+        cards = cards_res.scalars().all()
+        yellow_total = sum(1 for c in cards if c.card_type == CardType.YELLOW)
+        red_total = sum(1 for c in cards if c.card_type == CardType.RED)
+
+        # Игры и победы через TeamPlayer
+        from app.database.models import TeamPlayer as TP
+        tp_res = await session.execute(select(TP).where(TP.player_id == player.id))
+        team_ids = {tp.team_id for tp in tp_res.scalars().all()}
+
+        games_total = 0
+        wins_total = 0
+        if team_ids:
+            matches_res = await session.execute(
+                select(Match)
+                .options(selectinload(Match.team_home), selectinload(Match.team_away))
+                .where(
+                    Match.status == MatchStatus.FINISHED,
+                    (Match.team_home_id.in_(team_ids)) | (Match.team_away_id.in_(team_ids)),
+                )
+            )
+            for m in matches_res.scalars().all():
+                if m.team_home_id in team_ids:
+                    games_total += 1
+                    if m.score_home > m.score_away:
+                        wins_total += 1
+                elif m.team_away_id in team_ids:
+                    games_total += 1
+                    if m.score_away > m.score_home:
+                        wins_total += 1
+
+        return web.json_response({
+            "player": {
+                "name": player.name,
+                "position": getattr(player, "position", "") or "",
+                "rating": getattr(player, "rating", 0) or 0,
+                "goals_total": goals_total,
+                "games_total": games_total,
+                "wins_total": wins_total,
+                "yellow_cards_total": yellow_total,
+                "red_cards_total": red_total,
+            },
         })
 
 
@@ -925,16 +1535,9 @@ _REFEREE_HTML = """<!DOCTYPE html>
 <div class="dur-overlay" id="durOverlay">
   <div class="dur-sheet">
     <div class="dur-title">⏱ Продолжительность матча</div>
-    <div class="dur-grid" id="durGrid">
-      <button class="dur-btn" data-min="5"  onclick="selectDur(5)">5 мин</button>
-      <button class="dur-btn" data-min="7"  onclick="selectDur(7)">7 мин</button>
-      <button class="dur-btn" data-min="8"  onclick="selectDur(8)">8 мин</button>
-      <button class="dur-btn" data-min="10" onclick="selectDur(10)">10 мин</button>
-      <button class="dur-btn" data-min="12" onclick="selectDur(12)">12 мин</button>
-      <button class="dur-btn" data-min="15" onclick="selectDur(15)">15 мин</button>
-      <button class="dur-btn" data-min="20" onclick="selectDur(20)">20 мин</button>
-      <button class="dur-btn" data-min="25" onclick="selectDur(25)">25 мин</button>
-      <button class="dur-btn" data-min="30" onclick="selectDur(30)">30 мин</button>
+    <div class="dur-grid" id="durGrid" style="grid-template-columns:1fr 1fr;">
+      <button class="dur-btn" data-min="5" onclick="selectDur(5)">5 мин</button>
+      <button class="dur-btn" data-min="6" onclick="selectDur(6)">6 мин</button>
     </div>
     <div class="dur-custom">
       <input type="number" id="durCustom" placeholder="Другое (мин)" min="1" max="120"
@@ -2802,6 +3405,11 @@ def create_webapp() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/api/standings", api_standings)
+    # Player WebApp routes
+    app.router.add_get("/api/player/upcoming", api_player_upcoming)
+    app.router.add_post("/api/player/attend", api_player_attend)
+    app.router.add_get("/api/player/team", api_player_team)
+    app.router.add_get("/api/player/profile", api_player_profile)
     # Referee routes
     app.router.add_get("/referee", referee_page)
     app.router.add_get("/api/referee/gameday/{game_day_id}", api_referee_gameday)
