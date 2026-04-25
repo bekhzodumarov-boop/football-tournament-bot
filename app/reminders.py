@@ -17,6 +17,7 @@ from app.database.engine import AsyncSessionFactory
 from app.database.models import GameDay, GameDayStatus, Attendance, AttendanceResponse, BroadcastLog
 from app.keyboards.game_day import join_game_kb, confirm_attendance_kb
 from app.scheduler import scheduler
+from app.config import settings
 
 _bot: Bot | None = None
 
@@ -77,7 +78,7 @@ async def _send_reminder(game_day_id: int, hours_before: int) -> None:
                     await _bot.send_message(
                         att.player.telegram_id,
                         text,
-                        reply_markup=confirm_attendance_kb(game_day.id, lang),
+                        reply_markup=confirm_attendance_kb(game_day.id, lang, webapp_url=settings.WEBAPP_URL),
                         parse_mode="HTML",
                     )
                     await asyncio.sleep(0.05)
@@ -107,7 +108,7 @@ async def _send_reminder(game_day_id: int, hours_before: int) -> None:
                         await _bot.send_message(
                             att.player.telegram_id,
                             msg,
-                            reply_markup=confirm_attendance_kb(game_day_id, lang),
+                            reply_markup=confirm_attendance_kb(game_day_id, lang, webapp_url=settings.WEBAPP_URL),
                         )
                     await asyncio.sleep(0.05)
                 except Exception:
@@ -177,7 +178,7 @@ async def _send_confirm_reminder(game_day_id: int, reminder_type: str) -> None:
                 await _bot.send_message(
                     att.player.telegram_id,
                     text,
-                    reply_markup=confirm_attendance_kb(game_day_id, lang),
+                    reply_markup=confirm_attendance_kb(game_day_id, lang, webapp_url=settings.WEBAPP_URL),
                     parse_mode="HTML",
                 )
                 sent += 1
@@ -252,7 +253,7 @@ async def _send_announcement(game_day_id: int) -> None:
                 await _bot.send_message(
                     p.telegram_id,
                     text,
-                    reply_markup=join_game_kb(game_day.id, True, lang),
+                    reply_markup=join_game_kb(game_day.id, True, lang, webapp_url=settings.WEBAPP_URL),
                     parse_mode="HTML",
                 )
                 await asyncio.sleep(0.05)

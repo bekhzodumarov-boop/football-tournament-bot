@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import MenuButtonWebApp, WebAppInfo
 
 from app.config import settings
 from app.database.engine import create_db_and_tables
@@ -83,6 +84,19 @@ async def main():
         logger.info("Reminders rescheduled")
     except Exception as e:
         logger.warning(f"reschedule_all_reminders warning: {e}")
+
+    # Установить кнопку Menu → WebApp (глобально для всех чатов)
+    if settings.WEBAPP_URL:
+        try:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="⚽ Приложение",
+                    web_app=WebAppInfo(url=settings.WEBAPP_URL),
+                )
+            )
+            logger.info("MenuButtonWebApp set")
+        except Exception as e:
+            logger.warning(f"set_chat_menu_button failed: {e}")
 
     # Уведомить Админа о запуске
     for admin_id in settings.ADMIN_IDS:

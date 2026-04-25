@@ -28,7 +28,7 @@ from app.database.engine import AsyncSessionFactory
 from app.database.models import (
     GameDay, GameDayStatus, Match, MatchStatus, MatchFormat, Team, TeamPlayer,
     Goal, GoalType, Card, CardType, Attendance, AttendanceResponse, Player,
-    MatchGoalkeeper, PenaltyShootout,
+    MatchGoalkeeper, PenaltyShootout, PlayerLeague, League, Position,
 )
 
 # ─── HTML ────────────────────────────────────────────────────────────────────
@@ -268,6 +268,15 @@ _HTML = """<!DOCTYPE html>
     letter-spacing: 0.5px; margin-bottom: 6px;
   }
   .next-match-vs { font-size: 15px; font-weight: 700; }
+
+  /* ── Profile edit ── */
+  .prof-input {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; font-size: 15px; margin-bottom: 10px;
+    -webkit-appearance: none;
+  }
+  .prof-input:focus { outline: none; border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -661,6 +670,9 @@ async function loadProfile() {
   }
 }
 
+const POS_LABELS = { GK: '🧤 Вратарь', DEF: '🛡 Защитник', MID: '⚙️ Полузащитник', FWD: '⚡ Нападающий' };
+const LANG_LABELS = { ru: '🇷🇺 Русский', en: '🇬🇧 English', uz: '🇺🇿 O\'zbekcha', de: '🇩🇪 Deutsch' };
+
 function renderProfile(d) {
   const el = document.getElementById('app-profile');
   let html = '<h2>👤 Мой профиль</h2>';
@@ -670,9 +682,10 @@ function renderProfile(d) {
     return;
   }
   const p = d.player;
+  const posLabel = POS_LABELS[p.position] || p.position || '';
   html += `<div class="profile-card">
     <div class="profile-name">${p.name}</div>
-    <div class="profile-sub">${p.position || ''}</div>
+    <div class="profile-sub">${posLabel}</div>
     <div class="profile-stats">
       <div class="profile-stat"><div class="profile-stat-val">${p.goals_total}</div><div class="profile-stat-lbl">Голов</div></div>
       <div class="profile-stat"><div class="profile-stat-val">${p.games_total}</div><div class="profile-stat-lbl">Игр</div></div>
@@ -688,7 +701,134 @@ function renderProfile(d) {
       </div>
     </div>`;
   }
+
+  // ── Edit name & position ─────────────────────────
+  html += `<div class="profile-card" style="margin-top:8px">
+    <div class="section-title" style="margin-bottom:10px">✏️ Редактировать профиль</div>
+    <input id="prof-name" type="text" value="${p.name.replace(/"/g,'&quot;')}" maxlength="60"
+      placeholder="Имя" class="prof-input">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+      ${Object.entries(POS_LABELS).map(([k,v]) =>
+        `<button onclick="selectPos('${k}')" id="pos-btn-${k}"
+          style="padding:10px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;
+                 background:${p.position===k?'var(--accent)':'var(--bg)'};
+                 color:${p.position===k?'#fff':'var(--text)'};
+                 border:1px solid ${p.position===k?'var(--accent)':'var(--border)'};"
+        >${v}</button>`
+      ).join('')}
+    </div>
+    <button onclick="saveProfile()" class="attend-btn primary" id="prof-save-btn">
+      💾 Сохранить
+    </button>
+    <div id="prof-msg" style="margin-top:8px;font-size:13px;text-align:center;color:var(--accent);display:none"></div>
+  </div>`;
+
+  // ── Language ────────────────────────────────────
+  html += `<div class="profile-card" style="margin-top:8px">
+    <div class="section-title" style="margin-bottom:10px">🌐 Язык интерфейса</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      ${Object.entries(LANG_LABELS).map(([k,v]) =>
+        `<button onclick="setLang('${k}')" id="lang-btn-${k}"
+          style="padding:10px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;
+                 background:${p.language===k?'var(--accent)':'var(--bg)'};
+                 color:${p.language===k?'#fff':'var(--text)'};
+                 border:1px solid ${p.language===k?'var(--accent)':'var(--border)'};"
+        >${v}</button>`
+      ).join('')}
+    </div>
+  </div>`;
+
   el.innerHTML = html;
+  window._profileData = p;
+
+  // Load leagues
+  loadLeagues();
+}
+
+let _selectedPos = null;
+function selectPos(pos) {
+  _selectedPos = pos;
+  Object.keys(POS_LABELS).forEach(k => {
+    const btn = document.getElementById('pos-btn-' + k);
+    if (!btn) return;
+    btn.style.background = k === pos ? 'var(--accent)' : 'var(--bg)';
+    btn.style.color = k === pos ? '#fff' : 'var(--text)';
+    btn.style.borderColor = k === pos ? 'var(--accent)' : 'var(--border)';
+  });
+}
+
+async function saveProfile() {
+  const name = (document.getElementById('prof-name')?.value || '').trim();
+  const pos = _selectedPos || (window._profileData?.position || '');
+  const btn = document.getElementById('prof-save-btn');
+  const msg = document.getElementById('prof-msg');
+  if (!name) return;
+  if (btn) btn.textContent = '⏳';
+  try {
+    const r = await fetch('/api/player/profile' + tgParam, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, position: pos }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      if (msg) { msg.textContent = '✅ Сохранено'; msg.style.display = 'block'; }
+      if (window._profileData) {
+        window._profileData.name = name;
+        if (pos) window._profileData.position = pos;
+      }
+      setTimeout(() => { if (msg) msg.style.display = 'none'; }, 2000);
+    } else {
+      if (msg) { msg.textContent = '❌ Ошибка'; msg.style.color='#ff453a'; msg.style.display='block'; }
+    }
+  } catch(e) {
+    if (msg) { msg.textContent = '❌ Ошибка сети'; msg.style.color='#ff453a'; msg.style.display='block'; }
+  } finally {
+    if (btn) btn.textContent = '💾 Сохранить';
+  }
+}
+
+async function setLang(lang) {
+  if (!tgUser) return;
+  try {
+    const r = await fetch('/api/player/language' + tgParam, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lang }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      // Update button styles
+      Object.keys(LANG_LABELS).forEach(k => {
+        const btn = document.getElementById('lang-btn-' + k);
+        if (!btn) return;
+        btn.style.background = k === lang ? 'var(--accent)' : 'var(--bg)';
+        btn.style.color = k === lang ? '#fff' : 'var(--text)';
+        btn.style.borderColor = k === lang ? 'var(--accent)' : 'var(--border)';
+      });
+      if (window._profileData) window._profileData.language = lang;
+    }
+  } catch(e) {}
+}
+
+async function loadLeagues() {
+  if (!tgUser) return;
+  try {
+    const r = await fetch('/api/player/leagues' + tgParam);
+    const d = await r.json();
+    if (!d.leagues || d.leagues.length === 0) return;
+    const el = document.getElementById('app-profile');
+    const leagueHtml = `<div class="profile-card" style="margin-top:8px">
+      <div class="section-title" style="margin-bottom:8px">🏅 Мои лиги</div>
+      ${d.leagues.map(lg => `
+        <div style="display:flex;justify-content:space-between;align-items:center;
+                    padding:8px 0;border-bottom:1px solid var(--border);">
+          <span style="font-weight:600">${lg.name}${lg.city ? ' · ' + lg.city : ''}</span>
+          <span style="font-size:12px;color:var(--hint)">${lg.role === 'admin' ? '🔧 Админ' : '⚽ Игрок'}</span>
+        </div>`).join('')}
+    </div>`;
+    el.insertAdjacentHTML('beforeend', leagueHtml);
+  } catch(e) {}
 }
 
 // ── Init ──────────────────────────────────────
@@ -1207,18 +1347,104 @@ async def api_player_profile(request: web.Request) -> web.Response:
                     if m.score_away > m.score_home:
                         wins_total += 1
 
+        pos = getattr(player, "position", None)
         return web.json_response({
             "player": {
                 "name": player.name,
-                "position": getattr(player, "position", "") or "",
+                "position": pos.value if pos else "",
                 "rating": getattr(player, "rating", 0) or 0,
                 "goals_total": goals_total,
                 "games_total": games_total,
                 "wins_total": wins_total,
                 "yellow_cards_total": yellow_total,
                 "red_cards_total": red_total,
+                "language": getattr(player, "language", "ru") or "ru",
             },
         })
+
+
+async def api_player_profile_update(request: web.Request) -> web.Response:
+    """POST /api/player/profile?tg_id=X — update name and/or position"""
+    tg_id_str = request.rel_url.query.get("tg_id")
+    if not tg_id_str or not tg_id_str.isdigit():
+        return web.json_response({"ok": False, "error": "no tg_id"}, status=400)
+    tg_id = int(tg_id_str)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+
+    async with AsyncSessionFactory() as session:
+        p_res = await session.execute(select(Player).where(Player.telegram_id == tg_id))
+        player = p_res.scalar_one_or_none()
+        if not player:
+            return web.json_response({"ok": False, "error": "player not found"}, status=404)
+
+        name = (body.get("name") or "").strip()
+        if name and len(name) <= 60:
+            player.name = name
+
+        pos_str = (body.get("position") or "").upper()
+        valid_positions = {p.value for p in Position}
+        if pos_str in valid_positions:
+            player.position = Position(pos_str)
+
+        await session.commit()
+    return web.json_response({"ok": True})
+
+
+async def api_player_language_update(request: web.Request) -> web.Response:
+    """POST /api/player/language?tg_id=X — update language"""
+    tg_id_str = request.rel_url.query.get("tg_id")
+    if not tg_id_str or not tg_id_str.isdigit():
+        return web.json_response({"ok": False, "error": "no tg_id"}, status=400)
+    tg_id = int(tg_id_str)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+
+    lang = (body.get("lang") or "").lower()
+    if lang not in {"ru", "en", "uz", "de"}:
+        return web.json_response({"ok": False, "error": "invalid lang"}, status=400)
+
+    async with AsyncSessionFactory() as session:
+        p_res = await session.execute(select(Player).where(Player.telegram_id == tg_id))
+        player = p_res.scalar_one_or_none()
+        if not player:
+            return web.json_response({"ok": False, "error": "player not found"}, status=404)
+        player.language = lang
+        await session.commit()
+    return web.json_response({"ok": True})
+
+
+async def api_player_leagues_list(request: web.Request) -> web.Response:
+    """GET /api/player/leagues?tg_id=X — list player's leagues"""
+    tg_id_str = request.rel_url.query.get("tg_id")
+    if not tg_id_str or not tg_id_str.isdigit():
+        return web.json_response({"leagues": []})
+    tg_id = int(tg_id_str)
+
+    async with AsyncSessionFactory() as session:
+        p_res = await session.execute(select(Player).where(Player.telegram_id == tg_id))
+        player = p_res.scalar_one_or_none()
+        if not player:
+            return web.json_response({"leagues": []})
+
+        rows = await session.execute(
+            select(PlayerLeague, League)
+            .join(League, League.id == PlayerLeague.league_id)
+            .where(PlayerLeague.player_id == player.id)
+        )
+        leagues = []
+        for pl, lg in rows.all():
+            leagues.append({
+                "id": lg.id,
+                "name": lg.name,
+                "city": lg.city or "",
+                "role": pl.role.value,
+            })
+    return web.json_response({"leagues": leagues})
 
 
 async def index(request: web.Request) -> web.Response:
@@ -1374,10 +1600,7 @@ _REFEREE_HTML = """<!DOCTYPE html>
     padding: 10px 14px; border-bottom: 1px solid var(--border);
   }
   .event-item:last-child { border-bottom: none; }
-  .event-icon { font-size: 18px; flex-shrink: 0; }
-  .event-body { flex: 1; min-width: 0; }
-  .event-player { font-weight: 600; font-size: 14px; }
-  .event-meta { font-size: 12px; color: var(--hint); }
+  .event-line { flex: 1; font-size: 14px; font-weight: 600; min-width: 0; }
   .event-del {
     background: none; border: none; color: var(--danger);
     font-size: 18px; cursor: pointer; padding: 4px 8px; min-width: 44px; text-align: center;
@@ -1712,6 +1935,21 @@ function fmtTime(isoStr) {
   if (!isoStr) return '';
   const d = new Date(isoStr);
   return d.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+}
+
+// Team color mapping by color_emoji
+const EMOJI_COLORS = {
+  '🔴': '#ff453a', '❤️': '#ff453a', '🟥': '#ff453a',
+  '🔵': '#0a84ff', '💙': '#0a84ff', '🟦': '#0a84ff',
+  '🟢': '#30d158', '💚': '#30d158', '🟩': '#30d158',
+  '🟡': '#ffd60a', '💛': '#ffd60a', '🟨': '#ffd60a',
+  '🟠': '#ff9f0a', '🧡': '#ff9f0a', '🟧': '#ff9f0a',
+  '🟣': '#bf5af2', '💜': '#bf5af2', '🟪': '#bf5af2',
+  '⚪': '#ebebf5', '🤍': '#ebebf5', '⬜': '#ebebf5',
+  '⚫': '#8e8e93', '🖤': '#8e8e93', '⬛': '#8e8e93',
+};
+function teamColor(emoji) {
+  return EMOJI_COLORS[emoji] || '#ebebf5';
 }
 
 function elapsedSec(isoStr) {
@@ -2100,11 +2338,7 @@ function buildMatchHTML(data) {
         delBtn = `<button class="event-del" onclick="deleteCard(${ev.cardId})" title="Удалить карточку">✕</button>`;
       }
       html += `<div class="event-item">
-        <div class="event-icon">${ev.icon}</div>
-        <div class="event-body">
-          <div class="event-player">${ev.player}</div>
-          <div class="event-meta">${ev.meta}</div>
-        </div>
+        <div class="event-line" style="color:${ev.color}">${ev.line}</div>
         ${delBtn}
       </div>`;
     }
@@ -2124,25 +2358,33 @@ function pluralSaves(n) {
 function buildEvents(data) {
   const events = [];
   for (const g of (data.goals || [])) {
-    const teamName = g.team_id === data.home.id ? data.home.name : data.away.name;
+    const isHome = g.team_id === data.home.id;
+    const teamEmoji = isHome ? data.home.emoji : data.away.emoji;
+    const minStr = g.minute != null ? `${g.minute}'` : (g.scored_at ? fmtTime(g.scored_at) : '');
+    const icon = g.own_goal ? '⚽↩️' : '⚽';
+    const label = g.own_goal ? `${g.player_name} (автогол)` : g.player_name;
     events.push({
-      icon: g.own_goal ? '⚽↩️' : '⚽',
-      player: g.player_name + (g.own_goal ? ' (автогол)' : ''),
-      meta: teamName + (g.scored_at ? ' · ' + fmtTime(g.scored_at) : ''),
+      line: minStr ? `${minStr} ${icon} ${label}` : `${icon} ${label}`,
+      color: teamColor(teamEmoji),
       goalId: g.id,
       cardId: null,
+      sortKey: g.minute != null ? g.minute : 999,
     });
   }
   for (const c of (data.cards || [])) {
-    const teamName = c.team_id === data.home.id ? data.home.name : data.away.name;
+    const isHome = c.team_id === data.home.id;
+    const teamEmoji = isHome ? data.home.emoji : data.away.emoji;
+    const minStr = c.minute != null ? `${c.minute}'` : (c.issued_at ? fmtTime(c.issued_at) : '');
+    const icon = c.card_type === 'yellow' ? '🟨' : '🟥';
     events.push({
-      icon: c.card_type === 'yellow' ? '🟨' : '🟥',
-      player: c.player_name,
-      meta: teamName + (c.issued_at ? ' · ' + fmtTime(c.issued_at) : ''),
+      line: minStr ? `${minStr} ${icon} ${c.player_name}` : `${icon} ${c.player_name}`,
+      color: teamColor(teamEmoji),
       goalId: null,
       cardId: c.id,
+      sortKey: c.minute != null ? c.minute : 999,
     });
   }
+  events.sort((a, b) => a.sortKey - b.sortKey);
   return events;
 }
 
@@ -2824,22 +3066,32 @@ async def api_referee_match(request: web.Request) -> web.Response:
 
         goals_data = []
         for g in sorted(match.goals, key=lambda x: x.scored_at):
+            if g.scored_at and match.started_at:
+                minute = int((g.scored_at - match.started_at).total_seconds() / 60) + 1
+            else:
+                minute = None
             goals_data.append({
                 "id": g.id,
                 "player_name": g.player.name if g.player else "—",
                 "team_id": g.team_id,
                 "own_goal": g.goal_type == GoalType.OWN_GOAL,
                 "scored_at": (g.scored_at.isoformat() + "Z") if g.scored_at else None,
+                "minute": minute,
             })
 
         cards_data = []
         for c in sorted(match.cards, key=lambda x: x.issued_at):
+            if c.issued_at and match.started_at:
+                minute = int((c.issued_at - match.started_at).total_seconds() / 60) + 1
+            else:
+                minute = None
             cards_data.append({
                 "id": c.id,
                 "player_name": c.player.name if c.player else "—",
                 "team_id": c.team_id,
                 "card_type": c.card_type.value,
                 "issued_at": (c.issued_at.isoformat() + "Z") if c.issued_at else None,
+                "minute": minute,
             })
 
         # Goalkeepers for this match
@@ -3410,6 +3662,9 @@ def create_webapp() -> web.Application:
     app.router.add_post("/api/player/attend", api_player_attend)
     app.router.add_get("/api/player/team", api_player_team)
     app.router.add_get("/api/player/profile", api_player_profile)
+    app.router.add_post("/api/player/profile", api_player_profile_update)
+    app.router.add_post("/api/player/language", api_player_language_update)
+    app.router.add_get("/api/player/leagues", api_player_leagues_list)
     # Referee routes
     app.router.add_get("/referee", referee_page)
     app.router.add_get("/api/referee/gameday/{game_day_id}", api_referee_gameday)

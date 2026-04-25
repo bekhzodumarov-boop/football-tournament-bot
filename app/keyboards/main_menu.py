@@ -10,6 +10,13 @@ def main_menu_kb(
     is_admin: bool = False,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    if settings.WEBAPP_URL:
+        builder.row(
+            InlineKeyboardButton(
+                text="🌐 Открыть приложение",
+                web_app=WebAppInfo(url=settings.WEBAPP_URL),
+            )
+        )
     builder.row(
         InlineKeyboardButton(text=t("btn_upcoming_game", lang), callback_data="next_game"),
     )

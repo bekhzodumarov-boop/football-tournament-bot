@@ -1,12 +1,19 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.database.models import GameDay
 from app.locales.texts import t
 
 
-def join_game_kb(game_day_id: int, is_open: bool, lang: str = "ru") -> InlineKeyboardMarkup:
+def join_game_kb(game_day_id: int, is_open: bool, lang: str = "ru", webapp_url: str = "") -> InlineKeyboardMarkup:
     """Кнопки анонса игры."""
     builder = InlineKeyboardBuilder()
+    if webapp_url:
+        builder.row(
+            InlineKeyboardButton(
+                text="🌐 Открыть приложение",
+                web_app=WebAppInfo(url=webapp_url),
+            )
+        )
     if is_open:
         builder.row(
             InlineKeyboardButton(
@@ -44,10 +51,17 @@ def join_confirm_kb(game_day_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def confirm_attendance_kb(game_day_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
+def confirm_attendance_kb(game_day_id: int, lang: str = "ru", webapp_url: str = "") -> InlineKeyboardMarkup:
     """Кнопки финального подтверждения участия."""
     late_labels = {"ru": "⏰ Опаздываю", "en": "⏰ Running late", "uz": "⏰ Kechikaman", "de": "⏰ Komme später"}
     builder = InlineKeyboardBuilder()
+    if webapp_url:
+        builder.row(
+            InlineKeyboardButton(
+                text="🌐 Открыть приложение",
+                web_app=WebAppInfo(url=webapp_url),
+            )
+        )
     builder.row(
         InlineKeyboardButton(text=t("btn_confirm_yes", lang), callback_data=f"confirm_yes:{game_day_id}"),
         InlineKeyboardButton(text=t("btn_confirm_no", lang), callback_data=f"confirm_no:{game_day_id}"),
