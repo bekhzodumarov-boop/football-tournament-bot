@@ -1,11 +1,11 @@
 """
 Telegram WebApp — живая таблица турнира + судейская панель.
 aiohttp-сервер слушает на PORT (Railway).
-  GET /          → HTML-страница с таблицей
-  GET /api/standings  → JSON с данными турнира
-  GET /referee   → Судейская WebApp
+  GET /                          → HTML-страница с таблицей (+ LIVE, бомбардиры, плей-офф, профиль)
+  GET /api/standings[?tg_id=X]  → JSON с данными турнира
+  GET /referee                   → Судейская WebApp
   GET /api/referee/gameday/{game_day_id}   → матчи дня
-  GET /api/referee/match/{match_id}        → детали матча
+  GET /api/referee/match/{match_id}        → детали матча (+ next_match_id)
   POST /api/referee/match/{match_id}/start      → старт матча
   POST /api/referee/match/{match_id}/finish     → финиш матча
   POST /api/referee/match/{match_id}/goal       → зафиксировать гол
@@ -14,7 +14,8 @@ aiohttp-сервер слушает на PORT (Railway).
   POST /api/referee/match/{match_id}/goalkeeper → назначить вратаря
   POST /api/referee/match/{match_id}/save       → отметить сейв
   POST /api/referee/gameday/{game_day_id}/finish → завершить игровой день
-  DELETE /api/referee/goal/{goal_id}             → удалить гол
+  DELETE /api/referee/goal/{goal_id}            → удалить гол
+  DELETE /api/referee/card/{card_id}            → отменить карточку (W-6)
 """
 import json
 import os
@@ -115,6 +116,84 @@ _HTML = """<!DOCTYPE html>
     animation: pulse 2s infinite;
   }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  /* Live match banner */
+  .live-banner {
+    background: rgba(255,69,58,0.12);
+    border: 1px solid rgba(255,69,58,0.3);
+    border-radius: 12px; padding: 12px 14px; margin-bottom: 8px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .live-dot {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    background: #ff453a; flex-shrink: 0;
+    animation: pulse 1s infinite;
+  }
+  .live-badge {
+    font-size: 11px; font-weight: 700; color: #ff453a;
+    text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0;
+  }
+  .live-teams { flex: 1; font-weight: 600; font-size: 14px; }
+  .live-score {
+    font-size: 20px; font-weight: 900; color: #ff453a;
+    min-width: 52px; text-align: center; flex-shrink: 0;
+  }
+
+  /* Scorers */
+  .scorers-list { background: var(--bg2); border-radius: 12px; overflow: hidden; }
+  .scorer-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 14px; border-bottom: 1px solid var(--border);
+  }
+  .scorer-row:last-child { border-bottom: none; }
+  .scorer-rank { color: var(--hint); font-size: 13px; min-width: 18px; text-align: center; }
+  .scorer-name { flex: 1; font-weight: 600; font-size: 14px;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .scorer-meta { font-size: 12px; color: var(--hint); }
+  .scorer-goals {
+    font-size: 16px; font-weight: 800; color: var(--accent);
+    min-width: 28px; text-align: right; flex-shrink: 0;
+  }
+
+  /* Playoff bracket */
+  .playoff-card {
+    background: var(--bg2); border-radius: 10px;
+    padding: 10px 14px; margin-bottom: 6px;
+  }
+  .playoff-stage-lbl {
+    font-size: 10px; font-weight: 700; color: var(--hint);
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+  }
+  .playoff-match {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .playoff-team { flex: 1; font-size: 14px; font-weight: 600;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .playoff-team.home { text-align: right; }
+  .playoff-team.winner { color: var(--accent); }
+  .playoff-team.loser { opacity: 0.45; }
+  .playoff-score {
+    font-size: 18px; font-weight: 800; color: var(--accent);
+    min-width: 52px; text-align: center; flex-shrink: 0;
+  }
+  .playoff-score.pending { color: var(--hint); font-size: 13px; font-weight: 600; }
+
+  /* Player profile */
+  .profile-card {
+    background: var(--bg2); border-radius: 12px;
+    padding: 14px 16px; margin-bottom: 8px;
+  }
+  .profile-name { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+  .profile-sub { font-size: 12px; color: var(--hint); margin-bottom: 12px; }
+  .profile-stats {
+    display: grid; grid-template-columns: repeat(4,1fr); gap: 6px;
+  }
+  .profile-stat {
+    text-align: center; background: var(--bg);
+    border-radius: 10px; padding: 8px 4px;
+  }
+  .profile-stat-val { font-size: 20px; font-weight: 800; color: var(--accent); }
+  .profile-stat-lbl { font-size: 10px; color: var(--hint); margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -125,10 +204,12 @@ Telegram.WebApp.ready();
 Telegram.WebApp.expand();
 
 let countdown = 30;
+const tgUser = (Telegram.WebApp.initDataUnsafe || {}).user || null;
 
 async function load() {
   try {
-    const r = await fetch('/api/standings');
+    const tgParam = tgUser ? '?tg_id=' + tgUser.id : '';
+    const r = await fetch('/api/standings' + tgParam);
     const d = await r.json();
     render(d);
     countdown = 30;
@@ -138,6 +219,11 @@ async function load() {
   }
 }
 
+const STAGE_NAMES = {
+  group: 'Группа', semifinal: 'Полуфинал',
+  third_place: 'За 3-е место', final: 'Финал',
+};
+
 function render(d) {
   const app = document.getElementById('app');
   let html = '';
@@ -146,7 +232,21 @@ function render(d) {
   html += `<h2>🏆 Таблица турнира</h2>
   <div class="subtitle">${d.date || ''} · ${d.location || ''}</div>`;
 
-  // Standings
+  // ── W-2: LIVE матчи ────────────────────────────
+  if ((d.live_matches || []).length > 0) {
+    html += '<div class="section"><div class="section-title">🔴 Сейчас идёт</div>';
+    for (const m of d.live_matches) {
+      html += `<div class="live-banner">
+        <div class="live-dot"></div>
+        <div class="live-badge">LIVE</div>
+        <div class="live-teams">${m.home_emoji} ${m.home} — ${m.away_emoji} ${m.away}</div>
+        <div class="live-score">${m.score_home}:${m.score_away}</div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  // ── W-1: Standings ────────────────────────────
   html += '<div class="section"><div class="section-title">Таблица</div>';
   if (d.standings.length === 0) {
     html += '<div class="standings"><div class="empty">Матчей ещё не сыграно</div></div>';
@@ -175,7 +275,24 @@ function render(d) {
   }
   html += '</div>';
 
-  // Recent results
+  // ── W-1: Бомбардиры ───────────────────────────
+  if ((d.top_scorers || []).length > 0) {
+    html += '<div class="section"><div class="section-title">⚽ Бомбардиры</div>';
+    html += '<div class="scorers-list">';
+    d.top_scorers.forEach((s, i) => {
+      const medals = ['🥇','🥈','🥉'];
+      const rank = medals[i] || `${i+1}`;
+      html += `<div class="scorer-row">
+        <span class="scorer-rank">${rank}</span>
+        <span class="scorer-name">${s.name}</span>
+        <span class="scorer-meta">${s.team_emoji} ${s.team}</span>
+        <span class="scorer-goals">${s.goals} ⚽</span>
+      </div>`;
+    });
+    html += '</div></div>';
+  }
+
+  // ── Recent results ────────────────────────────
   html += '<div class="section"><div class="section-title">Последние результаты</div>';
   if (d.results.length === 0) {
     html += '<div class="empty">Матчей ещё нет</div>';
@@ -192,7 +309,7 @@ function render(d) {
   }
   html += '</div>';
 
-  // Upcoming
+  // ── Upcoming ──────────────────────────────────
   if (d.upcoming.length > 0) {
     html += '<div class="section upcoming"><div class="section-title">Предстоящие матчи</div>';
     d.upcoming.forEach(m => {
@@ -205,6 +322,65 @@ function render(d) {
       </div>`;
     });
     html += '</div>';
+  }
+
+  // ── W-3: Плей-офф сетка ──────────────────────
+  if ((d.playoff || []).length > 0) {
+    html += '<div class="section"><div class="section-title">🏆 Плей-офф</div>';
+    const stageOrder = ['semifinal', 'third_place', 'final'];
+    const byStage = {};
+    for (const m of d.playoff) {
+      if (!byStage[m.stage]) byStage[m.stage] = [];
+      byStage[m.stage].push(m);
+    }
+    for (const stage of stageOrder) {
+      if (!byStage[stage]) continue;
+      for (const m of byStage[stage]) {
+        const homeWon = m.finished && m.score_home > m.score_away;
+        const awayWon = m.finished && m.score_away > m.score_home;
+        const homeClass = 'playoff-team home' + (homeWon ? ' winner' : (awayWon ? ' loser' : ''));
+        const awayClass = 'playoff-team' + (awayWon ? ' winner' : (homeWon ? ' loser' : ''));
+        const scoreClass = m.finished ? 'playoff-score' : 'playoff-score pending';
+        const scoreText = m.finished ? `${m.score_home}:${m.score_away}` : 'vs';
+        html += `<div class="playoff-card">
+          <div class="playoff-stage-lbl">${STAGE_NAMES[m.stage] || m.stage}</div>
+          <div class="playoff-match">
+            <div class="${homeClass}">${m.home_emoji} ${m.home}</div>
+            <div class="${scoreClass}">${scoreText}</div>
+            <div class="${awayClass}">${m.away_emoji} ${m.away}</div>
+          </div>
+        </div>`;
+      }
+    }
+    html += '</div>';
+  }
+
+  // ── W-5: Профиль игрока ───────────────────────
+  if (d.player_stats) {
+    const ps = d.player_stats;
+    html += `<div class="section"><div class="section-title">👤 Мои показатели</div>
+    <div class="profile-card">
+      <div class="profile-name">${ps.name}</div>
+      <div class="profile-sub">${ps.team_emoji ? ps.team_emoji + ' ' : ''}${ps.position || ''}</div>
+      <div class="profile-stats">
+        <div class="profile-stat">
+          <div class="profile-stat-val">${ps.goals}</div>
+          <div class="profile-stat-lbl">Голов</div>
+        </div>
+        <div class="profile-stat">
+          <div class="profile-stat-val">${ps.games}</div>
+          <div class="profile-stat-lbl">Игр</div>
+        </div>
+        <div class="profile-stat">
+          <div class="profile-stat-val">${ps.wins}</div>
+          <div class="profile-stat-lbl">Побед</div>
+        </div>
+        <div class="profile-stat">
+          <div class="profile-stat-val">${ps.yellow_cards > 0 ? '🟨' + ps.yellow_cards : ps.red_cards > 0 ? '🟥' + ps.red_cards : '—'}</div>
+          <div class="profile-stat-lbl">Карточки</div>
+        </div>
+      </div>
+    </div></div>`;
   }
 
   // Refresh indicator
@@ -232,6 +408,9 @@ load();
 
 async def api_standings(request: web.Request) -> web.Response:
     """JSON API: текущая турнирная таблица для последнего активного дня."""
+    tg_id_str = request.rel_url.query.get("tg_id")
+    tg_id = int(tg_id_str) if tg_id_str and tg_id_str.isdigit() else None
+
     async with AsyncSessionFactory() as session:
         # Последний активный или завершённый игровой день
         result = await session.execute(
@@ -249,21 +428,27 @@ async def api_standings(request: web.Request) -> web.Response:
             return web.json_response({
                 "date": "", "location": "",
                 "standings": [], "results": [], "upcoming": [],
+                "live_matches": [], "top_scorers": [], "playoff": [],
+                "player_stats": None,
             })
 
-        # Матчи
+        # Матчи с командами и голами
         matches_result = await session.execute(
             select(Match)
-            .options(selectinload(Match.team_home), selectinload(Match.team_away))
+            .options(
+                selectinload(Match.team_home),
+                selectinload(Match.team_away),
+                selectinload(Match.goals).selectinload(Goal.player),
+            )
             .where(Match.game_day_id == game_day.id)
-            .order_by(Match.id)
+            .order_by(Match.match_order, Match.id)
         )
         matches = matches_result.scalars().all()
 
-        # Таблица
+        # Таблица (групповой этап)
         stats: dict[int, dict] = {}
         for m in matches:
-            if m.status != MatchStatus.FINISHED:
+            if m.status != MatchStatus.FINISHED or (m.match_stage and m.match_stage != "group"):
                 continue
             for team, gf, ga in [
                 (m.team_home, m.score_home, m.score_away),
@@ -286,12 +471,25 @@ async def api_standings(request: web.Request) -> web.Response:
         standings = sorted(stats.values(),
                            key=lambda x: (-x["pts"], -(x["gf"] - x["ga"]), -x["gf"]))
 
-        # Результаты (последние 10)
-        finished = [m for m in matches if m.status == MatchStatus.FINISHED]
+        # W-2: Live матчи (in_progress)
+        live_matches = [
+            {
+                "home": m.team_home.name, "home_emoji": m.team_home.color_emoji or "",
+                "away": m.team_away.name, "away_emoji": m.team_away.color_emoji or "",
+                "score_home": m.score_home, "score_away": m.score_away,
+            }
+            for m in matches if m.status == MatchStatus.IN_PROGRESS
+        ]
+
+        # Результаты (последние 10, только групп. этап)
+        finished_group = [
+            m for m in matches
+            if m.status == MatchStatus.FINISHED and (not m.match_stage or m.match_stage == "group")
+        ]
         results = [
             {"home": m.team_home.name, "away": m.team_away.name,
              "score_home": m.score_home, "score_away": m.score_away}
-            for m in finished[-10:]
+            for m in finished_group[-10:]
         ]
 
         # Предстоящие
@@ -300,12 +498,116 @@ async def api_standings(request: web.Request) -> web.Response:
             for m in matches if m.status == MatchStatus.SCHEDULED
         ][:5]
 
+        # W-1: Бомбардиры — топ-5 по голам (без автоголов)
+        scorer_map: dict[int, dict] = {}
+        for m in matches:
+            for g in (m.goals or []):
+                if g.goal_type == GoalType.OWN_GOAL or not g.player:
+                    continue
+                pid = g.player.id
+                if pid not in scorer_map:
+                    team = m.team_home if g.team_id == m.team_home_id else m.team_away
+                    scorer_map[pid] = {
+                        "name": g.player.name,
+                        "team": team.name,
+                        "team_emoji": team.color_emoji or "",
+                        "goals": 0,
+                    }
+                scorer_map[pid]["goals"] += 1
+
+        top_scorers = sorted(scorer_map.values(), key=lambda x: -x["goals"])[:5]
+
+        # W-3: Плей-офф матчи
+        playoff_stages = {"semifinal", "third_place", "final"}
+        playoff = [
+            {
+                "stage": m.match_stage,
+                "home": m.team_home.name, "home_emoji": m.team_home.color_emoji or "",
+                "away": m.team_away.name, "away_emoji": m.team_away.color_emoji or "",
+                "score_home": m.score_home, "score_away": m.score_away,
+                "finished": m.status == MatchStatus.FINISHED,
+            }
+            for m in matches if m.match_stage in playoff_stages
+        ]
+
+        # W-5: Профиль игрока по tg_id
+        player_stats = None
+        if tg_id:
+            p_res = await session.execute(
+                select(Player).where(Player.telegram_id == tg_id)
+            )
+            player = p_res.scalar_one_or_none()
+            if player:
+                # Голы в этом игровом дне
+                goals_count = sum(
+                    1 for m in matches
+                    for g in (m.goals or [])
+                    if g.player_id == player.id and g.goal_type != GoalType.OWN_GOAL
+                )
+                # Карточки
+                cards_result = await session.execute(
+                    select(Card)
+                    .join(Match, Card.match_id == Match.id)
+                    .where(
+                        Match.game_day_id == game_day.id,
+                        Card.player_id == player.id,
+                    )
+                )
+                cards = cards_result.scalars().all()
+                yellow_cards = sum(1 for c in cards if c.card_type == CardType.YELLOW)
+                red_cards = sum(1 for c in cards if c.card_type == CardType.RED)
+
+                # Игры и победы (через TeamPlayer)
+                from app.database.models import TeamPlayer as TP
+                tp_res = await session.execute(
+                    select(TP)
+                    .join(Team, TP.team_id == Team.id)
+                    .where(
+                        Team.game_day_id == game_day.id,
+                        TP.player_id == player.id,
+                    )
+                )
+                tp_rows = tp_res.scalars().all()
+                team_ids = {tp.team_id for tp in tp_rows}
+
+                games_played = 0
+                wins = 0
+                player_team_emoji = ""
+                for m in matches:
+                    if m.status != MatchStatus.FINISHED:
+                        continue
+                    if m.team_home_id in team_ids:
+                        games_played += 1
+                        player_team_emoji = m.team_home.color_emoji or ""
+                        if m.score_home > m.score_away:
+                            wins += 1
+                    elif m.team_away_id in team_ids:
+                        games_played += 1
+                        player_team_emoji = m.team_away.color_emoji or ""
+                        if m.score_away > m.score_home:
+                            wins += 1
+
+                player_stats = {
+                    "name": player.name,
+                    "position": getattr(player, "position", "") or "",
+                    "team_emoji": player_team_emoji,
+                    "goals": goals_count,
+                    "games": games_played,
+                    "wins": wins,
+                    "yellow_cards": yellow_cards,
+                    "red_cards": red_cards,
+                }
+
         return web.json_response({
             "date": game_day.scheduled_at.strftime("%d.%m.%Y"),
             "location": game_day.location,
             "standings": standings,
             "results": results,
             "upcoming": upcoming,
+            "live_matches": live_matches,
+            "top_scorers": top_scorers,
+            "playoff": playoff,
+            "player_stats": player_stats,
         })
 
 
@@ -1132,6 +1434,13 @@ function buildMatchHTML(data) {
   }
   html += `</div>`;
 
+  // W-4 T-035: Кнопка «Следующий матч» если есть
+  if (isFinished && data.next_match_id) {
+    html += `<div class="action-row">
+      <button class="btn btn-primary" onclick="openMatch(${data.next_match_id})">⏭ Следующий матч</button>
+    </div>`;
+  }
+
   // Substitution button (in_progress only)
   if (isInProgress) {
     html += `<div class="action-row">
@@ -1181,9 +1490,12 @@ function buildMatchHTML(data) {
   } else {
     html += `<div class="events-list">`;
     for (const ev of events) {
-      const delBtn = ev.goalId
-        ? `<button class="event-del" onclick="deleteGoal(${ev.goalId})" title="Удалить">✕</button>`
-        : '';
+      let delBtn = '';
+      if (ev.goalId) {
+        delBtn = `<button class="event-del" onclick="deleteGoal(${ev.goalId})" title="Удалить">✕</button>`;
+      } else if (ev.cardId) {
+        delBtn = `<button class="event-del" onclick="deleteCard(${ev.cardId})" title="Удалить карточку">✕</button>`;
+      }
       html += `<div class="event-item">
         <div class="event-icon">${ev.icon}</div>
         <div class="event-body">
@@ -1215,6 +1527,7 @@ function buildEvents(data) {
       player: g.player_name + (g.own_goal ? ' (автогол)' : ''),
       meta: teamName + (g.scored_at ? ' · ' + fmtTime(g.scored_at) : ''),
       goalId: g.id,
+      cardId: null,
     });
   }
   for (const c of (data.cards || [])) {
@@ -1224,6 +1537,7 @@ function buildEvents(data) {
       player: c.player_name,
       meta: teamName + (c.issued_at ? ' · ' + fmtTime(c.issued_at) : ''),
       goalId: null,
+      cardId: c.id,
     });
   }
   return events;
@@ -1409,6 +1723,16 @@ async function deleteGoal(goalId) {
   Telegram.WebApp.showConfirm('Удалить этот гол?', async (confirmed) => {
     if (!confirmed) return;
     const res = await apiFetch('/api/referee/goal/' + goalId, { method: 'DELETE' });
+    if (res && res.ok) {
+      await refreshMatch();
+    }
+  });
+}
+
+async function deleteCard(cardId) {
+  Telegram.WebApp.showConfirm('Отменить эту карточку?', async (confirmed) => {
+    if (!confirmed) return;
+    const res = await apiFetch('/api/referee/card/' + cardId, { method: 'DELETE' });
     if (res && res.ok) {
       await refreshMatch();
     }
@@ -1969,6 +2293,19 @@ async def api_referee_match(request: web.Request) -> web.Response:
                 "winner_team_id": ps.winner_team_id,
             }
 
+        # W-4 T-035: следующий запланированный матч в этом игровом дне
+        next_match_res = await session.execute(
+            select(Match.id)
+            .where(
+                Match.game_day_id == match.game_day_id,
+                Match.match_order > (match.match_order or 0),
+                Match.status == MatchStatus.SCHEDULED,
+            )
+            .order_by(Match.match_order)
+            .limit(1)
+        )
+        next_match_id = next_match_res.scalar()
+
         return web.json_response({
             "id": match.id,
             "stage": match.match_stage or "group",
@@ -1997,6 +2334,7 @@ async def api_referee_match(request: web.Request) -> web.Response:
             "home_gk": home_gk_data,
             "away_gk": away_gk_data,
             "penalty": penalty_data,
+            "next_match_id": next_match_id,
         })
 
 
@@ -2159,6 +2497,22 @@ async def api_referee_delete_goal(request: web.Request) -> web.Response:
             "score_home": match.score_home if match else 0,
             "score_away": match.score_away if match else 0,
         })
+
+
+async def api_referee_delete_card(request: web.Request) -> web.Response:
+    """DELETE /api/referee/card/{card_id} — отменить карточку"""
+    card_id = int(request.match_info["card_id"])
+
+    async with AsyncSessionFactory() as session:
+        result = await session.execute(select(Card).where(Card.id == card_id))
+        card = result.scalar_one_or_none()
+        if not card:
+            raise web.HTTPNotFound(reason="Card not found")
+
+        await session.delete(card)
+        await session.commit()
+
+    return web.json_response({"ok": True})
 
 
 async def api_referee_sub(request: web.Request) -> web.Response:
@@ -2460,6 +2814,7 @@ def create_webapp() -> web.Application:
     app.router.add_post("/api/referee/match/{match_id}/goalkeeper", api_referee_goalkeeper)
     app.router.add_post("/api/referee/match/{match_id}/save", api_referee_save)
     app.router.add_delete("/api/referee/goal/{goal_id}", api_referee_delete_goal)
+    app.router.add_delete("/api/referee/card/{card_id}", api_referee_delete_card)
     app.router.add_post("/api/referee/gameday/{game_day_id}/finish", api_referee_gameday_finish)
     app.router.add_post("/api/referee/gameday/{game_day_id}/new_match", api_referee_new_match)
     # New routes
