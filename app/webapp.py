@@ -170,8 +170,8 @@ _HTML = """<!DOCTYPE html>
   .playoff-team { flex: 1; font-size: 14px; font-weight: 600;
     overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .playoff-team.home { text-align: right; }
-  .playoff-team.winner { color: var(--accent); }
-  .playoff-team.loser { opacity: 0.45; }
+  .playoff-team.winner { font-size: 15px; font-weight: 800; }
+  .playoff-team.loser { font-size: 12px; font-weight: 500; opacity: 0.45; }
   .playoff-score {
     font-size: 18px; font-weight: 800; color: var(--accent);
     min-width: 52px; text-align: center; flex-shrink: 0;
