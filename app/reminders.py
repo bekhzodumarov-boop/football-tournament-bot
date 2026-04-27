@@ -51,22 +51,32 @@ async def _send_reminder(game_day_id: int, hours_before: int) -> None:
         attendances = result.scalars().all()
 
         if hours_before >= 24:
-            # За 24ч — «завтра игра» без кнопок подтверждения
+            # За 24ч — только тем, кто ещё не подтвердил, с кнопками
             for att in attendances:
+                if att.confirmed_final:
+                    continue
                 try:
+                    lang = getattr(att.player, 'language', None) or 'ru'
                     text = (
                         f"📅 <b>Завтра игра!</b>\n\n"
                         f"🕐 {time_str}  📍 {game_day.location}\n"
                         f"💰 Взнос: {game_day.cost_per_player} сум.\n\n"
-                        "Готовься! ⚽"
+                        "Подтверди участие — придёшь? ⚽"
                     )
-                    await _bot.send_message(att.player.telegram_id, text, parse_mode="HTML")
+                    await _bot.send_message(
+                        att.player.telegram_id,
+                        text,
+                        reply_markup=confirm_attendance_kb(game_day.id, lang, webapp_url=settings.WEBAPP_URL),
+                        parse_mode="HTML",
+                    )
                     await asyncio.sleep(0.05)
                 except Exception:
                     pass
         elif hours_before >= 9:
-            # За 9ч — напоминание с кнопками подтверждения
+            # За 9ч — только тем, кто ещё не подтвердил, с кнопками
             for att in attendances:
+                if att.confirmed_final:
+                    continue
                 try:
                     lang = getattr(att.player, 'language', None) or 'ru'
                     text = (

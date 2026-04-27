@@ -378,10 +378,12 @@ async def gd_announce_execute(call: CallbackQuery, session: AsyncSession, bot: B
     sent = 0
     for player in players:
         try:
+            lang = getattr(player, "language", None) or "ru"
             await bot.send_message(
                 player.telegram_id,
                 text,
-                reply_markup=join_game_kb(game_day.id, True)
+                reply_markup=join_game_kb(game_day.id, True, lang, webapp_url=settings.WEBAPP_URL),
+                parse_mode="HTML",
             )
             sent += 1
             await asyncio.sleep(0.05)

@@ -302,7 +302,7 @@ TEXTS = {
         # ── Buttons ───────────────────────────────────────────────────────
         "btn_my_team": "👥 Моя команда",
         "btn_top_scorers": "⚽ Бомбардиры",
-        "btn_upcoming_game": "📅 Ближайшая игра",
+        "btn_upcoming_game": "📅 Ближайшие игры",
         "btn_standings": "🏆 Таблица турнира",
         "btn_my_stats": "📊 Моя статистика",
         "btn_players_list": "👥 Игроки",
@@ -549,7 +549,7 @@ TEXTS = {
         # ── Buttons ───────────────────────────────────────────────────────
         "btn_my_team": "👥 My Team",
         "btn_top_scorers": "⚽ Scorers",
-        "btn_upcoming_game": "📅 Upcoming Game",
+        "btn_upcoming_game": "📅 Upcoming Games",
         "btn_standings": "🏆 Standings",
         "btn_my_stats": "📊 My Stats",
         "btn_players_list": "👥 Players",
@@ -816,7 +816,7 @@ TEXTS = {
         # ── Buttons ───────────────────────────────────────────────────────
         "btn_my_team": "👥 Mening jamoam",
         "btn_top_scorers": "⚽ Bombardirlar",
-        "btn_upcoming_game": "📅 Yaqin o'yin",
+        "btn_upcoming_game": "📅 Yaqin o'yinlar",
         "btn_standings": "🏆 Turnir jadvali",
         "btn_my_stats": "📊 Statistikam",
         "btn_players_list": "👥 O'yinchilar",
@@ -1084,7 +1084,7 @@ TEXTS = {
         # ── Buttons ───────────────────────────────────────────────────────
         "btn_my_team": "👥 Mein Team",
         "btn_top_scorers": "⚽ Torschützen",
-        "btn_upcoming_game": "📅 Nächstes Spiel",
+        "btn_upcoming_game": "📅 Nächste Spiele",
         "btn_standings": "🏆 Turniertabelle",
         "btn_my_stats": "📊 Meine Statistik",
         "btn_players_list": "👥 Spieler",

@@ -683,7 +683,16 @@ function renderProfile(d) {
   }
   const p = d.player;
   const posLabel = POS_LABELS[p.position] || p.position || '';
+  // Avatar: first letters of name words
+  const avatarLetters = p.name.trim().split(/[ ]+/).slice(0,2).map(w=>w[0]||'').join('').toUpperCase() || '?';
   html += `<div class="profile-card">
+    <div style="text-align:center;margin-bottom:12px">
+      <div style="width:72px;height:72px;border-radius:50%;background:var(--accent);
+                  display:inline-flex;align-items:center;justify-content:center;
+                  font-size:28px;font-weight:800;color:#fff;letter-spacing:-1px">
+        ${avatarLetters}
+      </div>
+    </div>
     <div class="profile-name">${p.name}</div>
     <div class="profile-sub">${posLabel}</div>
     <div class="profile-stats">

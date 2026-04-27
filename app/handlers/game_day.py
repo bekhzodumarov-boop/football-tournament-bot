@@ -5,7 +5,8 @@ from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,70 +56,90 @@ async def show_next_game(event, session: AsyncSession, player: Player | None):
     is_callback = isinstance(event, CallbackQuery)
     if is_callback:
         await event.answer()
-        send = event.message.edit_text
+        msg = event.message
     else:
-        send = event.answer
+        msg = event
 
+    lang = getattr(player, 'language', None) or 'ru' if player else 'ru'
     league_id = player.league_id if player else None
 
     query = (
         select(GameDay)
         .options(selectinload(GameDay.attendances))
-        .where(GameDay.status.in_([GameDayStatus.ANNOUNCED, GameDayStatus.IN_PROGRESS]))
+        .where(GameDay.status.in_([
+            GameDayStatus.ANNOUNCED, GameDayStatus.CLOSED, GameDayStatus.IN_PROGRESS,
+        ]))
         .order_by(GameDay.scheduled_at)
-        .limit(1)
     )
     if league_id is not None:
         query = query.where(GameDay.league_id == league_id)
 
     result = await session.execute(query)
-    game_day = result.scalar_one_or_none()
+    game_days = result.scalars().all()
 
-    if not game_day:
-        await send("📅 Ближайших игр пока нет. Следи за анонсами!")
+    if not game_days:
+        text = "📅 Активных игр пока нет. Следи за анонсами!"
+        kb_builder = InlineKeyboardBuilder()
+        kb_builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu"))
+        if is_callback:
+            await msg.edit_text(text, reply_markup=kb_builder.as_markup())
+        else:
+            await msg.answer(text, reply_markup=kb_builder.as_markup())
         return
 
-    registered = sum(1 for a in game_day.attendances if a.response == AttendanceResponse.YES)
-    waitlist = sum(1 for a in game_day.attendances if a.response == AttendanceResponse.WAITLIST)
-    spots_left = game_day.player_limit - registered
-
-    player_status = ""
+    # Собрать attendance текущего игрока одним запросом
+    player_atts: dict[int, Attendance] = {}
     if player:
-        att_result = await session.execute(
+        att_res = await session.execute(
             select(Attendance).where(
-                Attendance.game_day_id == game_day.id,
-                Attendance.player_id == player.id
+                Attendance.game_day_id.in_([gd.id for gd in game_days]),
+                Attendance.player_id == player.id,
             )
         )
-        att = att_result.scalar_one_or_none()
-        if att and att.response == AttendanceResponse.YES:
+        for att in att_res.scalars().all():
+            player_atts[att.game_day_id] = att
+
+    for gd in game_days:
+        registered = sum(1 for a in gd.attendances if a.response == AttendanceResponse.YES)
+        waitlist = sum(1 for a in gd.attendances if a.response == AttendanceResponse.WAITLIST)
+        spots_left = gd.player_limit - registered
+
+        # Статус текущего игрока в этой игре
+        player_status = ""
+        if player:
+            att = player_atts.get(gd.id)
             _gender = getattr(player, 'gender', 'm') or 'm'
-            _signed = "записана" if _gender == 'f' else "записан"
-            player_status = f"\n\n✅ <b>Ты {_signed} на эту игру!</b>"
-        elif att and att.response == AttendanceResponse.WAITLIST:
-            waitlist_list = [
-                a for a in game_day.attendances
-                if a.response == AttendanceResponse.WAITLIST
-            ]
-            waitlist_list.sort(key=lambda a: a.responded_at or datetime.min)
-            pos = next((i + 1 for i, a in enumerate(waitlist_list) if a.player_id == player.id), "?")
-            player_status = f"\n\n📋 <b>Ты в листе ожидания (#{pos})</b>"
-        elif att and att.response == AttendanceResponse.NO:
-            player_status = "\n\n❌ Ты отказался от этой игры."
+            if att and att.response == AttendanceResponse.YES:
+                _signed = "записана" if _gender == 'f' else "записан"
+                player_status = f"\n✅ <b>Ты {_signed}</b>"
+                if att.confirmed_final:
+                    player_status += " (подтверждено)"
+            elif att and att.response == AttendanceResponse.WAITLIST:
+                waitlist_list = sorted(
+                    [a for a in gd.attendances if a.response == AttendanceResponse.WAITLIST],
+                    key=lambda a: a.responded_at or datetime.min,
+                )
+                pos = next((i + 1 for i, a in enumerate(waitlist_list) if a.player_id == player.id), "?")
+                player_status = f"\n📋 <b>Ты в листе ожидания (#{pos})</b>"
+            elif att and att.response == AttendanceResponse.NO:
+                player_status = f"\n❌ Ты отказался от этой игры"
 
-    name_line = f"🏆 <b>{game_day.display_name}</b>\n" if game_day.tournament_number else ""
-    text = (
-        f"{name_line}"
-        f"⚽ <b>Ближайшая игра</b>\n\n"
-        f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
-        f"📍 {game_day.location}\n"
-        f"👥 Записалось: <b>{registered}/{game_day.player_limit}</b> "
-        + (f"(свободно: {spots_left})" if spots_left > 0 else "(<b>мест нет</b>)")
-        + (f"\n📋 Лист ожидания: {waitlist} чел." if waitlist > 0 else "")
-        + player_status
-    )
+        status_icon = "🔴 LIVE" if gd.status == GameDayStatus.IN_PROGRESS else "📅"
+        name_line = f"🏆 <b>{gd.display_name}</b>\n" if gd.tournament_number else ""
+        text = (
+            f"{name_line}"
+            f"{status_icon} {gd.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
+            f"📍 {gd.location}\n"
+            f"👥 Записалось: <b>{registered}/{gd.player_limit}</b>"
+            + (f" (свободно: {spots_left})" if spots_left > 0 else " (<b>мест нет</b>)")
+            + (f"\n📋 Ожидание: {waitlist} чел." if waitlist > 0 else "")
+            + player_status
+        )
 
-    await send(text, reply_markup=join_game_kb(game_day.id, game_day.is_open))
+        if is_callback and gd == game_days[0]:
+            await msg.edit_text(text, reply_markup=join_game_kb(gd.id, gd.is_open, lang, webapp_url=settings.WEBAPP_URL))
+        else:
+            await msg.answer(text, reply_markup=join_game_kb(gd.id, gd.is_open, lang, webapp_url=settings.WEBAPP_URL))
 
 
 # ---------- Таблица турнира (для игроков) ----------
@@ -530,12 +551,10 @@ async def create_gd_limit(message: Message, state: FSMContext,
     # Вычислить следующий порядковый номер турнира (минимальный свободный)
     tournament_number = await _next_tournament_number(session, league_id)
 
-    # T-024: вычислить время анонса — за 3 дня в 20:00
+    # Анонс за 48 часов до игры
     now = datetime.now()
-    announce_at = (scheduled_at - timedelta(days=3)).replace(
-        hour=20, minute=0, second=0, microsecond=0
-    )
-    # Если announce_at уже прошёл или игра через <3 дней — открываем регистрацию сразу
+    announce_at = scheduled_at - timedelta(hours=48)
+    # Если игра уже через <48ч — анонс немедленно, иначе по расписанию
     announce_immediately = announce_at <= now
 
     game_day = GameDay(
@@ -558,18 +577,16 @@ async def create_gd_limit(message: Message, state: FSMContext,
     schedule_reminders(game_day)
 
     if announce_immediately:
-        # Анонс разослать немедленно
-        status_text = "Анонс автоматически разослан всем игрокам лиги 📢"
+        # Игра через <48ч — анонс сразу
         await _auto_announce(session, bot, game_day, league_id)
+        status_text = "📢 Анонс разослан всем игрокам лиги (игра через менее 48ч)"
     else:
-        # Запланировать анонс на announce_at
+        # Запланировать анонс на 48ч до игры
         schedule_announcement(game_day)
         status_text = (
-            f"📣 Анонс с регистрацией будет разослан автоматически\n"
-            f"🗓 {announce_at.strftime('%d.%m.%Y в %H:%M')}\n\n"
-            f"Сейчас игрокам отправлено уведомление о создании турнира."
+            f"📣 Анонс будет разослан автоматически\n"
+            f"🗓 {announce_at.strftime('%d.%m.%Y в %H:%M')} (за 48ч до игры)"
         )
-        await _notify_tournament_created(session, bot, game_day, league_id)
 
     from app.keyboards.main_menu import admin_menu_kb
     await message.answer(
@@ -687,10 +704,12 @@ async def _auto_announce(session: AsyncSession, bot: Bot,
 
     for p in players:
         try:
+            lang = getattr(p, "language", None) or "ru"
             await bot.send_message(
                 p.telegram_id,
                 text,
-                reply_markup=join_game_kb(game_day.id, game_day.is_open)
+                reply_markup=join_game_kb(game_day.id, game_day.is_open, lang, webapp_url=settings.WEBAPP_URL),
+                parse_mode="HTML",
             )
             await asyncio.sleep(0.05)
         except Exception as e:
