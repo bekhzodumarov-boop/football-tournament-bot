@@ -2059,33 +2059,102 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
 # ══════════════════════════════════════════════════════
 
 class BasketFSM(StatesGroup):
-    waiting_separate_players = State()  # мультивыбор "разлучить" пар
+    waiting_setup = State()             # выбор числа команд
+    waiting_separate_players = State()  # задание правил разлучения
+
+
+def _basket_render_setup(n_players: int, game_day_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Экран выбора числа команд."""
+    auto = 4 if n_players >= 16 else (3 if n_players >= 9 else 2)
+    text = (
+        f"🎯 <b>Basket-баланс</b>\n\n"
+        f"👥 Записалось: <b>{n_players}</b> игроков\n\n"
+        f"Сколько команд создать?"
+    )
+    builder = InlineKeyboardBuilder()
+    for t in [2, 3, 4, 5, 6]:
+        if n_players >= t * 2:
+            label = f"{t} команды" if t in (2, 3, 4) else f"{t} команд"
+            if t == auto:
+                label = "⭐ " + label
+            builder.button(text=label, callback_data=f"basket_set_teams:{game_day_id}:{t}")
+    builder.adjust(3)
+    builder.row(InlineKeyboardButton(text="🔙 Отмена", callback_data=f"gd_players:{game_day_id}"))
+    return text, builder.as_markup()
+
+
+async def _basket_render_rules(msg, data: dict, edit: bool = True) -> None:
+    """Экран выбора правил разлучения — перерисовывает сообщение."""
+    game_day_id = data["game_day_id"]
+    num_teams = data["num_teams"]
+    player_ids: list[int] = data["player_ids"]
+    players_map: dict[str, str] = data["players_map"]  # str(id) → name
+    separate_rules: list[list[int]] = data.get("separate_rules", [])
+    current_sel: list[int] = data.get("current_sel", [])
+
+    lines = [f"🎯 <b>Basket-баланс</b>  👥 {len(player_ids)} игр. | {num_teams} команды"]
+
+    if separate_rules:
+        lines.append("\n<b>Правила разлучения:</b>")
+        for i, rule in enumerate(separate_rules, 1):
+            names = " ↔ ".join(players_map.get(str(pid), f"#{pid}") for pid in rule)
+            lines.append(f"  {i}. {names}")
+
+    if current_sel:
+        sel_names = " + ".join(players_map.get(str(pid), f"#{pid}") for pid in current_sel)
+        lines.append(f"\n<b>Текущий выбор:</b> {sel_names}")
+        lines.append("<i>(выбери ещё игроков и нажми «Сохранить правило»)</i>")
+    else:
+        lines.append("\n<i>Выбери игроков для нового правила разлучения (минимум 2):</i>")
+
+    # Собрать ID уже занятые правилами
+    in_rule_ids = {pid for rule in separate_rules for pid in rule}
+
+    builder = InlineKeyboardBuilder()
+    for pid in player_ids:
+        name = players_map.get(str(pid), f"#{pid}")
+        if pid in current_sel:
+            label = f"✅ {name}"
+        elif pid in in_rule_ids:
+            label = f"🔒 {name}"
+        else:
+            label = name
+        builder.button(text=label, callback_data=f"basket_sep:{pid}")
+    builder.adjust(2)
+
+    if len(current_sel) >= 2:
+        builder.row(
+            InlineKeyboardButton(text="➕ Сохранить правило", callback_data="basket_add_rule"),
+            InlineKeyboardButton(text="🗑 Сбросить выбор", callback_data="basket_clear_sel"),
+        )
+    elif current_sel:
+        builder.row(InlineKeyboardButton(text="🗑 Сбросить выбор", callback_data="basket_clear_sel"))
+
+    if separate_rules:
+        builder.row(InlineKeyboardButton(text="❌ Очистить все правила", callback_data="basket_clear_rules"))
+
+    builder.row(InlineKeyboardButton(
+        text="✅ Готово — разбить на команды",
+        callback_data=f"basket_execute:{game_day_id}:{num_teams}"
+    ))
+    builder.row(InlineKeyboardButton(text="🔙 Отмена", callback_data=f"gd_players:{game_day_id}"))
+
+    text = "\n".join(lines)
+    if edit:
+        await msg.edit_text(text, reply_markup=builder.as_markup())
+    else:
+        await msg.answer(text, reply_markup=builder.as_markup())
 
 
 @router.callback_query(F.data.startswith("gd_basket_teams:"))
 async def basket_teams_start(call: CallbackQuery, session: AsyncSession, state: FSMContext):
-    """Старт basket-балансировки: показываем список игроков по рейтинговым корзинам."""
+    """Старт basket-балансировки: спрашиваем число команд."""
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔", show_alert=True)
         return
     await call.answer()
 
     game_day_id = int(call.data.split(":")[1])
-
-    # Загрузить записавшихся
-    result = await session.execute(
-        select(Attendance)
-        .options(selectinload(Attendance.player))
-        .where(Attendance.game_day_id == game_day_id, Attendance.response == AttendanceResponse.YES)
-    )
-    attendances = result.scalars().all()
-    players: list[Player] = sorted(
-        [a.player for a in attendances if a.player],
-        key=lambda p: p.rating,
-        reverse=True,
-    )
-
-    n_players = len(players)
 
     # Проверить — есть ли уже команды
     teams_res = await session.execute(select(Team).where(Team.game_day_id == game_day_id))
@@ -2103,46 +2172,51 @@ async def basket_teams_start(call: CallbackQuery, session: AsyncSession, state: 
         )
         return
 
+    # Загрузить записавшихся
+    result = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(Attendance.game_day_id == game_day_id, Attendance.response == AttendanceResponse.YES)
+    )
+    attendances = result.scalars().all()
+    players: list[Player] = sorted(
+        [a.player for a in attendances if a.player],
+        key=lambda p: p.rating,
+        reverse=True,
+    )
+    n_players = len(players)
+
     if n_players < 4:
         await call.answer("⚠️ Нужно минимум 4 игрока.", show_alert=True)
         return
 
-    # Определить оптимальное число команд (4 по умолчанию, если ≥ 16 игроков)
-    num_teams = 4 if n_players >= 16 else (3 if n_players >= 9 else 2)
-
+    # Сохранить игроков в state для следующих шагов
+    players_map = {str(p.id): p.name for p in players}
     await state.update_data(
         game_day_id=game_day_id,
-        num_teams=num_teams,
-        separate_ids=[],
         player_ids=[p.id for p in players],
+        players_map=players_map,
+        separate_rules=[],
+        current_sel=[],
     )
+    await state.set_state(BasketFSM.waiting_setup)
 
-    lines = [f"🎯 <b>Basket-баланс</b>\n\n👥 Игроков: <b>{n_players}</b> | Команд: <b>{num_teams}</b>\n"]
+    text, kb = _basket_render_setup(n_players, game_day_id)
+    await call.message.edit_text(text, reply_markup=kb)
 
-    # Показать корзины
-    per_team = n_players // num_teams
-    basket_size = num_teams  # по одному из каждой корзины
-    baskets = _split_baskets(players, num_teams, per_team)
-    for i, (label, bucket) in enumerate(baskets, 1):
-        names = ", ".join(p.name for p in bucket)
-        lines.append(f"<b>Корзина {label} (топ {sum(len(b[1]) for b in baskets[:i])} — {sum(len(b[1]) for b in baskets[:i+1])}):</b> {names}")
 
-    lines.append("\n<i>Выбери игроков, которых нужно разлучить (разные команды). Нажми «Готово» для пропуска.</i>")
+@router.callback_query(F.data.startswith("basket_set_teams:"), StateFilter(BasketFSM.waiting_setup))
+async def basket_set_teams(call: CallbackQuery, state: FSMContext):
+    """Админ выбрал количество команд → переходим к правилам разлучения."""
+    await call.answer()
+    parts = call.data.split(":")
+    num_teams = int(parts[2])
 
+    await state.update_data(num_teams=num_teams, separate_rules=[], current_sel=[])
     await state.set_state(BasketFSM.waiting_separate_players)
 
-    # Кнопки игроков (мультивыбор)
-    builder = InlineKeyboardBuilder()
-    for p in players:
-        builder.button(text=p.name, callback_data=f"basket_sep:{p.id}")
-    builder.adjust(2)
-    builder.row(InlineKeyboardButton(
-        text="✅ Готово — разлучить и разбить",
-        callback_data=f"basket_execute:{game_day_id}:{num_teams}"
-    ))
-    builder.row(InlineKeyboardButton(text="🔙 Отмена", callback_data=f"gd_players:{game_day_id}"))
-
-    await call.message.edit_text("\n".join(lines), reply_markup=builder.as_markup())
+    data = await state.get_data()
+    await _basket_render_rules(call.message, data, edit=True)
 
 
 def _split_baskets(players: list, num_teams: int, per_team: int) -> list[tuple[str, list]]:
@@ -2172,71 +2246,129 @@ def _split_baskets(players: list, num_teams: int, per_team: int) -> list[tuple[s
 
 
 def _basket_assign(players: list, num_teams: int, per_team: int,
-                   separate_ids: list[int]) -> list[list]:
+                   separate_rules: list[list[int]]) -> list[list]:
     """
     Распределяет игроков по num_teams командам используя basket-алгоритм.
-    separate_ids: ID игроков, которых нужно разлучить (каждый в своей команде).
+    separate_rules: список правил — каждое правило = список ID игроков, которые
+    должны оказаться в РАЗНЫХ командах.
     """
     import random
+    from collections import defaultdict
 
     total = num_teams * per_team
     players = players[:total]
     baskets = _split_baskets(players, num_teams, per_team)
 
-    # Перемешать игроков внутри корзины, с учётом separate_ids
-    shuffled_baskets = []
-    for label, bucket in baskets:
-        bucket = list(bucket)
-        random.shuffle(bucket)
-        # Продвинуть "разлучаемых" на разные позиции
-        seps = [p for p in bucket if p.id in separate_ids]
-        others = [p for p in bucket if p.id not in separate_ids]
-        # Распределяем seps по разным позициям (индексам команды)
-        merged = []
-        sep_idx = 0
-        for i in range(num_teams):
-            if i < len(seps):
-                merged.append(seps[sep_idx])
-                sep_idx += 1
-            elif others:
-                merged.append(others.pop(0))
-        # Добавить оставшихся
-        merged.extend(others)
-        shuffled_baskets.append((label, merged))
+    # Построить граф ограничений: player_id → множество ID с кем нельзя быть
+    constraints: dict[int, set[int]] = defaultdict(set)
+    for rule in separate_rules:
+        for i, pid in enumerate(rule):
+            for j, other_pid in enumerate(rule):
+                if i != j:
+                    constraints[pid].add(other_pid)
 
     # Инициализируем команды
     teams: list[list] = [[] for _ in range(num_teams)]
+    team_sets: list[set[int]] = [set() for _ in range(num_teams)]  # ID игроков в команде i
 
-    # Из каждой корзины раздаём по одному (или двум для средней) на каждую команду
-    for label, bucket in shuffled_baskets:
-        per_basket_team = len(bucket) // num_teams
-        for i in range(num_teams):
-            start = i * per_basket_team
-            end = start + per_basket_team
-            teams[i].extend(bucket[start:end])
-        # Остаток раздаём по одному
-        remainder = bucket[num_teams * per_basket_team:]
-        for i, p in enumerate(remainder):
-            teams[i % num_teams].append(p)
+    # Из каждой корзины назначаем игроков с учётом ограничений
+    for label, bucket in baskets:
+        bucket = list(bucket)
+        random.shuffle(bucket)
+
+        # Сортируем: сначала игроки с ограничениями (их сложнее разместить)
+        constrained = [p for p in bucket if p.id in constraints]
+        free = [p for p in bucket if p.id not in constraints]
+        ordered = constrained + free
+
+        # Отслеживаем сколько из этой корзины уже назначено каждой команде
+        basket_count = [0] * num_teams
+        per_basket = len(bucket) // num_teams  # обычно 1
+
+        for player in ordered:
+            player_constraints = constraints.get(player.id, set())
+
+            # Найти допустимые команды (нет нарушений ограничений + не переполнена)
+            valid = [
+                i for i in range(num_teams)
+                if not (player_constraints & team_sets[i])
+                and basket_count[i] < per_basket + 1
+            ]
+            if not valid:
+                # Нарушение неизбежно — выбираем команду с наименьшим числом нарушений
+                def violations(i):
+                    return len(player_constraints & team_sets[i])
+                valid = sorted(range(num_teams), key=lambda i: (violations(i), basket_count[i]))
+
+            chosen = valid[0]
+            teams[chosen].append(player)
+            team_sets[chosen].add(player.id)
+            basket_count[chosen] += 1
 
     return teams
 
 
 @router.callback_query(F.data.startswith("basket_sep:"), StateFilter(BasketFSM.waiting_separate_players))
 async def basket_sep_toggle(call: CallbackQuery, state: FSMContext):
-    """Тогл выбора игроков для разлучения."""
+    """Тогл выбора игрока для текущего правила."""
     player_id = int(call.data.split(":")[1])
     data = await state.get_data()
-    sep_ids: list = list(data.get("separate_ids", []))
+    current_sel: list = list(data.get("current_sel", []))
+    separate_rules: list = data.get("separate_rules", [])
 
-    if player_id in sep_ids:
-        sep_ids.remove(player_id)
-        await call.answer("❌ Убран из списка разлучения")
+    # Не даём выбирать игрока который уже в каком-то правиле
+    in_rule = any(player_id in rule for rule in separate_rules)
+    if in_rule:
+        await call.answer("🔒 Этот игрок уже в правиле разлучения", show_alert=False)
+        return
+
+    if player_id in current_sel:
+        current_sel.remove(player_id)
+        await call.answer("❌ Убран")
     else:
-        sep_ids.append(player_id)
-        await call.answer(f"✅ Отмечен для разлучения")
+        current_sel.append(player_id)
+        await call.answer("✅ Выбран")
 
-    await state.update_data(separate_ids=sep_ids)
+    await state.update_data(current_sel=current_sel)
+    data = await state.get_data()
+    await _basket_render_rules(call.message, data, edit=True)
+
+
+@router.callback_query(F.data == "basket_add_rule", StateFilter(BasketFSM.waiting_separate_players))
+async def basket_add_rule(call: CallbackQuery, state: FSMContext):
+    """Сохранить текущий выбор как правило разлучения."""
+    data = await state.get_data()
+    current_sel: list = list(data.get("current_sel", []))
+    separate_rules: list = list(data.get("separate_rules", []))
+
+    if len(current_sel) < 2:
+        await call.answer("⚠️ Выбери минимум 2 игрока", show_alert=True)
+        return
+
+    separate_rules.append(current_sel)
+    await state.update_data(separate_rules=separate_rules, current_sel=[])
+    await call.answer(f"✅ Правило сохранено ({len(current_sel)} игроков)")
+
+    data = await state.get_data()
+    await _basket_render_rules(call.message, data, edit=True)
+
+
+@router.callback_query(F.data == "basket_clear_sel", StateFilter(BasketFSM.waiting_separate_players))
+async def basket_clear_sel(call: CallbackQuery, state: FSMContext):
+    """Сбросить текущий выбор (не правила)."""
+    await call.answer("🗑 Выбор сброшен")
+    await state.update_data(current_sel=[])
+    data = await state.get_data()
+    await _basket_render_rules(call.message, data, edit=True)
+
+
+@router.callback_query(F.data == "basket_clear_rules", StateFilter(BasketFSM.waiting_separate_players))
+async def basket_clear_rules(call: CallbackQuery, state: FSMContext):
+    """Очистить все правила разлучения."""
+    await call.answer("❌ Все правила удалены")
+    await state.update_data(separate_rules=[], current_sel=[])
+    data = await state.get_data()
+    await _basket_render_rules(call.message, data, edit=True)
 
 
 @router.callback_query(F.data.startswith("basket_reset:"))
@@ -2277,7 +2409,7 @@ async def basket_execute(call: CallbackQuery, session: AsyncSession,
     num_teams = int(parts[2])
 
     data = await state.get_data()
-    separate_ids: list[int] = data.get("separate_ids", [])
+    separate_rules: list[list[int]] = data.get("separate_rules", [])
     await state.clear()
 
     # Загрузить игроков
@@ -2300,7 +2432,7 @@ async def basket_execute(call: CallbackQuery, session: AsyncSession,
         await call.answer("⚠️ Слишком мало игроков.", show_alert=True)
         return
 
-    team_buckets = _basket_assign(players, num_teams, per_team, separate_ids)
+    team_buckets = _basket_assign(players, num_teams, per_team, separate_rules)
 
     # Создать команды в БД
     from app.database.models import POSITION_LABELS, Position
@@ -2361,10 +2493,14 @@ async def basket_execute(call: CallbackQuery, session: AsyncSession,
                 logger.warning(f"basket team assign notify failed: {e}")
 
     # Сводка для администратора
-    sep_names = [p.name for p in players if p.id in separate_ids]
+    player_name_map = {p.id: p.name for p in players}
     admin_lines = [f"🎯 <b>Basket-баланс завершён! ({gd_name})</b>\n"]
-    if sep_names:
-        admin_lines.append(f"↔️ Разлучённые: {', '.join(sep_names)}\n")
+    if separate_rules:
+        admin_lines.append("↔️ <b>Правила разлучения:</b>")
+        for rule in separate_rules:
+            names = " ↔ ".join(player_name_map.get(pid, f"#{pid}") for pid in rule)
+            admin_lines.append(f"  • {names}")
+        admin_lines.append("")
     for team_info in teams_data:
         admin_lines.append(
             f"\n{team_info['color']} <b>Команда {team_info['name']}</b> "
