@@ -92,7 +92,7 @@ def game_day_action_kb(game_day_id: int) -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="🎲 Авто-команды", callback_data=f"gd_auto_teams:{game_day_id}"),
-        InlineKeyboardButton(text="✋ Вручную", callback_data=f"ref_setup_teams:{game_day_id}"),
+        InlineKeyboardButton(text="✋ Вручную", callback_data=f"manual_teams:{game_day_id}"),
     )
     builder.row(
         InlineKeyboardButton(text="🎯 Basket-баланс", callback_data=f"gd_basket_teams:{game_day_id}"),

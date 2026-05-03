@@ -1614,8 +1614,8 @@ async def gd_rating_close(call: CallbackQuery, session: AsyncSession):
 #  АВТО-КОМАНДЫ (балансировка по рейтингу + позиции)
 # ══════════════════════════════════════════════════════
 
-TEAM_COLORS = ["🔴", "🟡", "🔵", "🟢", "🟠", "🟣", "⚪", "⚫"]
-TEAM_NAMES  = ["Red", "Golden", "Blue", "Green", "E", "F", "G", "H"]
+TEAM_COLORS = ["🔴", "🟡", "🔵", "🟢", "⚫", "⚪"]
+TEAM_NAMES  = ["Red", "Golden", "Blue", "Green", "Black", "White"]
 
 
 @router.callback_query(F.data.startswith("gd_auto_teams:"))
@@ -2052,6 +2052,383 @@ async def auto_teams_execute(call: CallbackQuery, session: AsyncSession, bot: Bo
 
     # Показать сводку Админу (новым сообщением — надёжнее edit_text)
     await call.message.answer(full_summary, reply_markup=game_day_action_kb(game_day_id))
+
+
+# ══════════════════════════════════════════════════════
+#  РУЧНОЙ НАБОР КОМАНД
+# ══════════════════════════════════════════════════════
+
+class ManualTeamsFSM(StatesGroup):
+    waiting_num_teams = State()   # выбор числа команд
+    assigning = State()           # назначение игроков
+
+
+def _manual_teams_kb(game_day_id: int, num_teams: int, assignments: dict,
+                     current_idx: int, player_ids: list, players_map: dict,
+                     current_sel: list) -> InlineKeyboardMarkup:
+    """Клавиатура экрана ручного набора команд."""
+    builder = InlineKeyboardBuilder()
+
+    # Верхняя строка — кнопки команд
+    team_row = []
+    for i in range(num_teams):
+        color = TEAM_COLORS[i]
+        name = TEAM_NAMES[i]
+        count = len(assignments.get(str(i), []))
+        done = count > 0
+        active = i == current_idx
+        label = f"{'→ ' if active else ''}{color} {name}" + (f" ✓{count}" if done else "")
+        team_row.append(InlineKeyboardButton(
+            text=label,
+            callback_data=f"mteam_pick:{game_day_id}:{i}"
+        ))
+    # По 3 в ряд
+    for j in range(0, len(team_row), 3):
+        builder.row(*team_row[j:j+3])
+
+    # Список игроков — уже назначенные скрыты
+    assigned_ids = {pid for lst in assignments.values() for pid in lst}
+    available = [pid for pid in player_ids if pid not in assigned_ids]
+    for pid in available:
+        name = players_map.get(str(pid), f"#{pid}")
+        label = f"✅ {name}" if pid in current_sel else name
+        builder.button(text=label, callback_data=f"mteam_sel:{pid}")
+    builder.adjust(*(
+        [3] * (len(team_row) // 3 + (1 if len(team_row) % 3 else 0))
+        + [2] * (len(available) // 2 + (1 if len(available) % 2 else 0))
+    ))
+
+    color = TEAM_COLORS[current_idx]
+    tname = TEAM_NAMES[current_idx]
+    if current_sel:
+        builder.row(InlineKeyboardButton(
+            text=f"💾 Сохранить в {color} {tname}",
+            callback_data=f"mteam_save:{game_day_id}"
+        ))
+    builder.row(
+        InlineKeyboardButton(text="🗑 Сбросить выбор", callback_data="mteam_clear_sel"),
+        InlineKeyboardButton(text="🔙 Отмена", callback_data=f"gd_players:{game_day_id}"),
+    )
+    return builder.as_markup()
+
+
+async def _render_manual_teams(msg, state: FSMContext, edit: bool = True) -> None:
+    """Перерисовать экран ручного набора."""
+    data = await state.get_data()
+    game_day_id = data["game_day_id"]
+    num_teams = data["num_teams"]
+    assignments: dict = data.get("assignments", {})
+    current_idx: int = data.get("current_idx", 0)
+    player_ids: list = data["player_ids"]
+    players_map: dict = data["players_map"]
+    current_sel: list = data.get("current_sel", [])
+
+    assigned_total = sum(len(v) for v in assignments.values())
+    color = TEAM_COLORS[current_idx]
+    tname = TEAM_NAMES[current_idx]
+
+    lines = [f"👥 <b>Ручной набор команд</b>  ({assigned_total}/{len(player_ids)} распределено)\n"]
+    lines.append(f"<b>Выбираешь: {color} {tname}</b>")
+    if current_sel:
+        sel_names = ", ".join(players_map.get(str(pid), f"#{pid}") for pid in current_sel)
+        lines.append(f"Отмечено: {sel_names}")
+    lines.append("\n<i>Нажми на игрока чтобы отметить, затем «Сохранить»</i>")
+
+    kb = _manual_teams_kb(
+        game_day_id, num_teams, assignments, current_idx,
+        player_ids, players_map, current_sel
+    )
+    text = "\n".join(lines)
+    if edit:
+        await msg.edit_text(text, reply_markup=kb)
+    else:
+        await msg.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("manual_teams:"))
+async def manual_teams_start(call: CallbackQuery, session: AsyncSession, state: FSMContext):
+    """Старт ручного набора: спрашиваем число команд."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+
+    # Если уже есть команды — спросить подтверждение
+    teams_res = await session.execute(select(Team).where(Team.game_day_id == game_day_id))
+    existing = teams_res.scalars().all()
+    if existing:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(
+            text="🔄 Удалить команды и пересоздать",
+            callback_data=f"manual_teams_reset:{game_day_id}"
+        ))
+        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
+        await call.message.edit_text(
+            f"⚠️ Уже есть {len(existing)} команды. Удалить и начать заново?",
+            reply_markup=builder.as_markup()
+        )
+        return
+
+    # Загрузить записавшихся
+    result = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(Attendance.game_day_id == game_day_id, Attendance.response == AttendanceResponse.YES)
+    )
+    attendances = result.scalars().all()
+    players = sorted([a.player for a in attendances if a.player], key=lambda p: p.name)
+
+    if len(players) < 2:
+        await call.answer("⚠️ Нужно минимум 2 игрока.", show_alert=True)
+        return
+
+    players_map = {str(p.id): p.name for p in players}
+    await state.update_data(
+        game_day_id=game_day_id,
+        player_ids=[p.id for p in players],
+        players_map=players_map,
+        assignments={},
+        current_idx=0,
+        current_sel=[],
+    )
+    await state.set_state(ManualTeamsFSM.waiting_num_teams)
+
+    n = len(players)
+    builder = InlineKeyboardBuilder()
+    for t in [2, 3, 4, 5, 6]:
+        if n >= t * 2:
+            builder.button(text=f"{t} команды" if t <= 4 else f"{t} команд",
+                           callback_data=f"mteam_num:{game_day_id}:{t}")
+    builder.adjust(3)
+    builder.row(InlineKeyboardButton(text="🔙 Отмена", callback_data=f"gd_players:{game_day_id}"))
+
+    await call.message.edit_text(
+        f"✋ <b>Ручной набор команд</b>\n\n👥 Записалось: <b>{n}</b> игроков\n\nСколько команд?",
+        reply_markup=builder.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("manual_teams_reset:"))
+async def manual_teams_reset(call: CallbackQuery, session: AsyncSession, state: FSMContext):
+    """Удалить существующие команды и запустить ручной набор заново."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    game_day_id = int(call.data.split(":")[1])
+    from sqlalchemy import delete as sql_delete
+    teams_res = await session.execute(select(Team).where(Team.game_day_id == game_day_id))
+    for team in teams_res.scalars().all():
+        await session.execute(sql_delete(TeamPlayer).where(TeamPlayer.team_id == team.id))
+        await session.delete(team)
+    await session.commit()
+    call.data = f"manual_teams:{game_day_id}"
+    await manual_teams_start(call, session, state)
+
+
+@router.callback_query(F.data.startswith("mteam_num:"), StateFilter(ManualTeamsFSM.waiting_num_teams))
+async def mteam_set_num(call: CallbackQuery, state: FSMContext):
+    """Выбрали число команд — переходим к назначению."""
+    await call.answer()
+    num_teams = int(call.data.split(":")[2])
+    await state.update_data(num_teams=num_teams, assignments={}, current_idx=0, current_sel=[])
+    await state.set_state(ManualTeamsFSM.assigning)
+    await _render_manual_teams(call.message, state, edit=True)
+
+
+@router.callback_query(F.data.startswith("mteam_pick:"), StateFilter(ManualTeamsFSM.assigning))
+async def mteam_pick_team(call: CallbackQuery, state: FSMContext):
+    """Переключиться на другую команду."""
+    await call.answer()
+    idx = int(call.data.split(":")[2])
+    await state.update_data(current_idx=idx, current_sel=[])
+    await _render_manual_teams(call.message, state, edit=True)
+
+
+@router.callback_query(F.data.startswith("mteam_sel:"), StateFilter(ManualTeamsFSM.assigning))
+async def mteam_toggle_player(call: CallbackQuery, state: FSMContext):
+    """Тогл игрока в текущем выборе."""
+    pid = int(call.data.split(":")[1])
+    data = await state.get_data()
+    current_sel = list(data.get("current_sel", []))
+    if pid in current_sel:
+        current_sel.remove(pid)
+        await call.answer("❌")
+    else:
+        current_sel.append(pid)
+        await call.answer("✅")
+    await state.update_data(current_sel=current_sel)
+    await _render_manual_teams(call.message, state, edit=True)
+
+
+@router.callback_query(F.data == "mteam_clear_sel", StateFilter(ManualTeamsFSM.assigning))
+async def mteam_clear_sel(call: CallbackQuery, state: FSMContext):
+    """Сбросить текущий выбор."""
+    await call.answer("🗑 Сброшено")
+    await state.update_data(current_sel=[])
+    await _render_manual_teams(call.message, state, edit=True)
+
+
+@router.callback_query(F.data.startswith("mteam_save:"), StateFilter(ManualTeamsFSM.assigning))
+async def mteam_save_team(call: CallbackQuery, state: FSMContext):
+    """Сохранить выбранных игроков в текущую команду."""
+    await call.answer()
+    data = await state.get_data()
+    current_sel = list(data.get("current_sel", []))
+    if not current_sel:
+        await call.answer("⚠️ Никого не выбрано", show_alert=True)
+        return
+
+    assignments = dict(data.get("assignments", {}))
+    current_idx = data["current_idx"]
+    num_teams = data["num_teams"]
+
+    assignments[str(current_idx)] = current_sel
+
+    # Автопереход к следующей незаполненной команде
+    next_idx = current_idx
+    for i in range(num_teams):
+        if str(i) not in assignments or not assignments[str(i)]:
+            next_idx = i
+            break
+    else:
+        next_idx = current_idx  # все заполнены
+
+    await state.update_data(assignments=assignments, current_idx=next_idx, current_sel=[])
+    data = await state.get_data()
+
+    # Если все команды заполнены — показать сводку
+    all_filled = all(str(i) in assignments and assignments[str(i)] for i in range(num_teams))
+    if all_filled:
+        await _render_manual_summary(call.message, data)
+    else:
+        await _render_manual_teams(call.message, state, edit=True)
+
+
+async def _render_manual_summary(msg, data: dict) -> None:
+    """Показать итоговую сводку команд с кнопками OK / Переназначить."""
+    num_teams = data["num_teams"]
+    assignments = data["assignments"]
+    players_map = data["players_map"]
+    game_day_id = data["game_day_id"]
+
+    lines = ["👥 <b>Итоговые составы команд</b>\n"]
+    for i in range(num_teams):
+        color = TEAM_COLORS[i]
+        name = TEAM_NAMES[i]
+        pids = assignments.get(str(i), [])
+        names = ", ".join(players_map.get(str(pid), f"#{pid}") for pid in pids)
+        lines.append(f"{color} <b>{name}</b> ({len(pids)} чел.): {names}")
+
+    unassigned_ids = {
+        pid for pid in data["player_ids"]
+        if not any(pid in assignments.get(str(i), []) for i in range(num_teams))
+    }
+    if unassigned_ids:
+        un_names = ", ".join(players_map.get(str(pid), f"#{pid}") for pid in unassigned_ids)
+        lines.append(f"\n⚠️ Не распределены: {un_names}")
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Готово — создать команды", callback_data=f"mteam_confirm:{game_day_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔄 Переназначить", callback_data=f"mteam_reassign:{game_day_id}"),
+    )
+    await msg.edit_text("\n".join(lines), reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("mteam_reassign:"))
+async def mteam_reassign(call: CallbackQuery, state: FSMContext):
+    """Вернуться к назначению (сбросить все команды)."""
+    await call.answer()
+    await state.update_data(assignments={}, current_idx=0, current_sel=[])
+    await state.set_state(ManualTeamsFSM.assigning)
+    await _render_manual_teams(call.message, state, edit=True)
+
+
+@router.callback_query(F.data.startswith("mteam_confirm:"))
+async def mteam_confirm(call: CallbackQuery, session: AsyncSession, state: FSMContext, bot: Bot):
+    """Создать команды в БД и разослать игрокам."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("⏳ Создаю команды...")
+
+    data = await state.get_data()
+    await state.clear()
+
+    game_day_id = data["game_day_id"]
+    num_teams = data["num_teams"]
+    assignments = data["assignments"]
+    players_map = data["players_map"]
+
+    # Загрузить полные объекты Player
+    all_pids = [pid for pids in assignments.values() for pid in pids]
+    p_res = await session.execute(select(Player).where(Player.id.in_(all_pids)))
+    players_by_id = {p.id: p for p in p_res.scalars().all()}
+
+    game_day = await session.get(GameDay, game_day_id)
+    gd_name = game_day.display_name if game_day else f"#{game_day_id}"
+
+    from app.locales.texts import t as loc_t
+    teams_data = []
+    for i in range(num_teams):
+        pids = assignments.get(str(i), [])
+        if not pids:
+            continue
+        team = Team(game_day_id=game_day_id, name=TEAM_NAMES[i], color_emoji=TEAM_COLORS[i])
+        session.add(team)
+        await session.flush()
+        members = []
+        for pid in pids:
+            session.add(TeamPlayer(team_id=team.id, player_id=pid))
+            p = players_by_id.get(pid)
+            if p:
+                members.append({
+                    "telegram_id": p.telegram_id,
+                    "name": p.name,
+                    "language": getattr(p, "language", None) or "ru",
+                })
+        teams_data.append({
+            "name": TEAM_NAMES[i],
+            "color": TEAM_COLORS[i],
+            "members": members,
+        })
+    await session.commit()
+
+    # Разослать игрокам
+    sent = 0
+    for team_info in teams_data:
+        member_names = [m["name"] for m in team_info["members"]]
+        for member in team_info["members"]:
+            other_names = [n for n in member_names if n != member["name"]]
+            lang = member.get("language", "ru")
+            teammates_text = ", ".join(other_names) or "—"
+            try:
+                await bot.send_message(
+                    member["telegram_id"],
+                    loc_t("team_assigned", lang,
+                          game_name=gd_name,
+                          team_color=team_info["color"],
+                          team_name=team_info["name"],
+                          teammates=teammates_text),
+                    parse_mode="HTML",
+                )
+                sent += 1
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                logger.warning(f"manual team notify failed: {e}")
+
+    # Сводка для админа
+    from app.keyboards.game_day import game_day_action_kb
+    admin_lines = [f"✋ <b>Ручной набор завершён ({gd_name})</b>\n"]
+    for team_info in teams_data:
+        names = ", ".join(m["name"] for m in team_info["members"])
+        admin_lines.append(f"{team_info['color']} <b>{team_info['name']}</b>: {names}")
+    admin_lines.append(f"\n📨 Уведомлено: {sent}")
+    await call.message.edit_text("\n".join(admin_lines), reply_markup=game_day_action_kb(game_day_id))
 
 
 # ══════════════════════════════════════════════════════
