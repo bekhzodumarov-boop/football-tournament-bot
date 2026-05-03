@@ -80,6 +80,37 @@ async def cmd_start(message: Message, player: Player | None, state: FSMContext,
         await _send_reglament(message, player)
         return
 
+    # deep link: t.me/bot?start=game_{id}  (поделиться игрой)
+    if command and command.args and command.args.startswith("game_"):
+        try:
+            game_day_id = int(command.args[5:])
+            from app.database.models import GameDay, Attendance
+            from sqlalchemy.orm import selectinload as _sil
+            from app.handlers.game_day import _game_card_text, _make_share_url
+            from app.keyboards.game_day import join_game_kb
+            gd = await session.get(GameDay, game_day_id, options=[_sil(GameDay.attendances)])
+            if gd:
+                _lang = (getattr(player, 'language', None) or 'ru') if player else 'ru'
+                _atts: dict = {}
+                if player:
+                    from sqlalchemy import select as _sel
+                    _ar = await session.execute(
+                        _sel(Attendance).where(
+                            Attendance.game_day_id == game_day_id,
+                            Attendance.player_id == player.id,
+                        )
+                    )
+                    for _a in _ar.scalars().all():
+                        _atts[_a.game_day_id] = _a
+                _text = _game_card_text(gd, player, _atts)
+                _kb = join_game_kb(gd.id, gd.is_open, _lang,
+                                   webapp_url=settings.WEBAPP_URL,
+                                   share_url=_make_share_url(gd))
+                await message.answer(_text, reply_markup=_kb, parse_mode="HTML")
+                return
+        except Exception:
+            pass
+
     # deep link: t.me/bot?start=join_XXXXXXXX  (приглашение в лигу)
     if command and command.args and command.args.startswith("join_"):
         invite_code = command.args[5:]  # strip "join_"

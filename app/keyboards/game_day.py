@@ -4,7 +4,7 @@ from app.database.models import GameDay
 from app.locales.texts import t
 
 
-def join_game_kb(game_day_id: int, is_open: bool, lang: str = "ru", webapp_url: str = "") -> InlineKeyboardMarkup:
+def join_game_kb(game_day_id: int, is_open: bool, lang: str = "ru", webapp_url: str = "", share_url: str = "", back_to_list: bool = False) -> InlineKeyboardMarkup:
     """Кнопки анонса игры."""
     builder = InlineKeyboardBuilder()
     if webapp_url:
@@ -15,23 +15,34 @@ def join_game_kb(game_day_id: int, is_open: bool, lang: str = "ru", webapp_url: 
             )
         )
     if is_open:
+        join_btn = InlineKeyboardButton(
+            text=t("btn_join", lang),
+            callback_data=f"join_pre:{game_day_id}"
+        )
+        if share_url:
+            builder.row(join_btn, InlineKeyboardButton(text="📤 Поделиться", url=share_url))
+        else:
+            builder.row(join_btn)
         builder.row(
-            InlineKeyboardButton(
-                text=t("btn_join", lang),
-                callback_data=f"join_pre:{game_day_id}"
-            ),
             InlineKeyboardButton(text=t("btn_decline", lang), callback_data=f"decline:{game_day_id}"),
         )
     else:
-        builder.row(
-            InlineKeyboardButton(text="🔒 Набор закрыт", callback_data="closed"),
-        )
+        if share_url:
+            builder.row(
+                InlineKeyboardButton(text="🔒 Набор закрыт", callback_data="closed"),
+                InlineKeyboardButton(text="📤 Поделиться", url=share_url),
+            )
+        else:
+            builder.row(
+                InlineKeyboardButton(text="🔒 Набор закрыт", callback_data="closed"),
+            )
     builder.row(
         InlineKeyboardButton(text="📊 Таблица турнира", callback_data=f"gd_standings:{game_day_id}"),
     )
-    builder.row(
-        InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu"),
-    )
+    if back_to_list:
+        builder.row(InlineKeyboardButton(text="🔙 Все игры", callback_data="next_game"))
+    else:
+        builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu"))
     return builder.as_markup()
 
 

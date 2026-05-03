@@ -48,7 +48,63 @@ async def gameday_cancel(message: Message, state: FSMContext):
     )
 
 
-# ---------- Показать ближайшую игру ----------
+# ---------- Вспомогательная функция: сформировать share_url для игры ----------
+
+def _make_share_url(gd) -> str:
+    """Ссылка для кнопки «Поделиться» — открывает Telegram share-диалог."""
+    import urllib.parse
+    bot_url = f"https://t.me/{settings.BOT_USERNAME}?start=game_{gd.id}"
+    share_text = (
+        f"🏆 {gd.display_name}\n"
+        f"📅 {gd.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"📍 {gd.location}\n"
+        f"👥 Лимит: {gd.player_limit} чел."
+    )
+    return f"https://t.me/share/url?url={urllib.parse.quote(bot_url)}&text={urllib.parse.quote(share_text)}"
+
+
+# ---------- Вспомогательная функция: текст карточки игры ----------
+
+def _game_card_text(gd, player: Player | None, player_atts: dict) -> str:
+    """Формирует текст с информацией об игровом дне."""
+    registered = sum(1 for a in gd.attendances if a.response == AttendanceResponse.YES)
+    waitlist = sum(1 for a in gd.attendances if a.response == AttendanceResponse.WAITLIST)
+    spots_left = gd.player_limit - registered
+
+    player_status = ""
+    if player:
+        att = player_atts.get(gd.id)
+        _gender = getattr(player, 'gender', 'm') or 'm'
+        if att and att.response == AttendanceResponse.YES:
+            _signed = "записана" if _gender == 'f' else "записан"
+            player_status = f"\n✅ <b>Ты {_signed}</b>"
+            if att.confirmed_final:
+                player_status += " (подтверждено)"
+        elif att and att.response == AttendanceResponse.WAITLIST:
+            waitlist_list = sorted(
+                [a for a in gd.attendances if a.response == AttendanceResponse.WAITLIST],
+                key=lambda a: a.responded_at or datetime.min,
+            )
+            pos = next((i + 1 for i, a in enumerate(waitlist_list) if a.player_id == player.id), "?")
+            player_status = f"\n📋 <b>Ты в листе ожидания (#{pos})</b>"
+        elif att and att.response == AttendanceResponse.NO:
+            _declined = "отказалась" if _gender == 'f' else "отказался"
+            player_status = f"\n❌ Ты {_declined} от этой игры"
+
+    status_icon = "🔴 LIVE" if gd.status == GameDayStatus.IN_PROGRESS else "📅"
+    name_line = f"🏆 <b>{gd.display_name}</b>\n" if gd.tournament_number else ""
+    return (
+        f"{name_line}"
+        f"{status_icon} {gd.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"📍 {gd.location}\n"
+        f"👥 Записалось: <b>{registered}/{gd.player_limit}</b>"
+        + (f" (свободно: {spots_left})" if spots_left > 0 else " (<b>мест нет</b>)")
+        + (f"\n📋 Ожидание: {waitlist} чел." if waitlist > 0 else "")
+        + player_status
+    )
+
+
+# ---------- Список ближайших игр ----------
 
 @router.callback_query(F.data == "next_game")
 @router.message(Command("game"))
@@ -87,59 +143,75 @@ async def show_next_game(event, session: AsyncSession, player: Player | None):
             await msg.answer(text, reply_markup=kb_builder.as_markup())
         return
 
-    # Собрать attendance текущего игрока одним запросом
+    # Если одна игра — сразу показать детали
+    if len(game_days) == 1:
+        gd = game_days[0]
+        player_atts: dict[int, Attendance] = {}
+        if player:
+            att_res = await session.execute(
+                select(Attendance).where(
+                    Attendance.game_day_id == gd.id,
+                    Attendance.player_id == player.id,
+                )
+            )
+            for att in att_res.scalars().all():
+                player_atts[att.game_day_id] = att
+        text = _game_card_text(gd, player, player_atts)
+        kb = join_game_kb(gd.id, gd.is_open, lang,
+                          webapp_url=settings.WEBAPP_URL,
+                          share_url=_make_share_url(gd))
+        if is_callback:
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        else:
+            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+        return
+
+    # Несколько игр — показать список
+    text = "📅 <b>Ближайшие игры:</b>\n\nВыбери игру, чтобы посмотреть подробности и записаться."
+    kb_builder = InlineKeyboardBuilder()
+    for gd in game_days:
+        registered = sum(1 for a in gd.attendances if a.response == AttendanceResponse.YES)
+        status_icon = "🔴" if gd.status == GameDayStatus.IN_PROGRESS else ("🔒" if not gd.is_open else "✅")
+        label = f"{status_icon} {gd.display_name} — {gd.scheduled_at.strftime('%d.%m')} ({registered}/{gd.player_limit})"
+        kb_builder.row(InlineKeyboardButton(text=label, callback_data=f"game_detail:{gd.id}"))
+    kb_builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu"))
+
+    if is_callback:
+        await msg.edit_text(text, reply_markup=kb_builder.as_markup(), parse_mode="HTML")
+    else:
+        await msg.answer(text, reply_markup=kb_builder.as_markup(), parse_mode="HTML")
+
+
+# ---------- Детали одной игры (из списка или deep link) ----------
+
+@router.callback_query(F.data.startswith("game_detail:"))
+async def game_detail(call: CallbackQuery, session: AsyncSession, player: Player | None):
+    await call.answer()
+    game_day_id = int(call.data.split(":")[1])
+    lang = getattr(player, 'language', None) or 'ru' if player else 'ru'
+
+    gd = await session.get(GameDay, game_day_id, options=[selectinload(GameDay.attendances)])
+    if not gd:
+        await call.message.edit_text("❌ Игра не найдена.")
+        return
+
     player_atts: dict[int, Attendance] = {}
     if player:
         att_res = await session.execute(
             select(Attendance).where(
-                Attendance.game_day_id.in_([gd.id for gd in game_days]),
+                Attendance.game_day_id == game_day_id,
                 Attendance.player_id == player.id,
             )
         )
         for att in att_res.scalars().all():
             player_atts[att.game_day_id] = att
 
-    for gd in game_days:
-        registered = sum(1 for a in gd.attendances if a.response == AttendanceResponse.YES)
-        waitlist = sum(1 for a in gd.attendances if a.response == AttendanceResponse.WAITLIST)
-        spots_left = gd.player_limit - registered
-
-        # Статус текущего игрока в этой игре
-        player_status = ""
-        if player:
-            att = player_atts.get(gd.id)
-            _gender = getattr(player, 'gender', 'm') or 'm'
-            if att and att.response == AttendanceResponse.YES:
-                _signed = "записана" if _gender == 'f' else "записан"
-                player_status = f"\n✅ <b>Ты {_signed}</b>"
-                if att.confirmed_final:
-                    player_status += " (подтверждено)"
-            elif att and att.response == AttendanceResponse.WAITLIST:
-                waitlist_list = sorted(
-                    [a for a in gd.attendances if a.response == AttendanceResponse.WAITLIST],
-                    key=lambda a: a.responded_at or datetime.min,
-                )
-                pos = next((i + 1 for i, a in enumerate(waitlist_list) if a.player_id == player.id), "?")
-                player_status = f"\n📋 <b>Ты в листе ожидания (#{pos})</b>"
-            elif att and att.response == AttendanceResponse.NO:
-                player_status = f"\n❌ Ты отказался от этой игры"
-
-        status_icon = "🔴 LIVE" if gd.status == GameDayStatus.IN_PROGRESS else "📅"
-        name_line = f"🏆 <b>{gd.display_name}</b>\n" if gd.tournament_number else ""
-        text = (
-            f"{name_line}"
-            f"{status_icon} {gd.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
-            f"📍 {gd.location}\n"
-            f"👥 Записалось: <b>{registered}/{gd.player_limit}</b>"
-            + (f" (свободно: {spots_left})" if spots_left > 0 else " (<b>мест нет</b>)")
-            + (f"\n📋 Ожидание: {waitlist} чел." if waitlist > 0 else "")
-            + player_status
-        )
-
-        if is_callback and gd == game_days[0]:
-            await msg.edit_text(text, reply_markup=join_game_kb(gd.id, gd.is_open, lang, webapp_url=settings.WEBAPP_URL))
-        else:
-            await msg.answer(text, reply_markup=join_game_kb(gd.id, gd.is_open, lang, webapp_url=settings.WEBAPP_URL))
+    text = _game_card_text(gd, player, player_atts)
+    kb = join_game_kb(gd.id, gd.is_open, lang,
+                      webapp_url=settings.WEBAPP_URL,
+                      share_url=_make_share_url(gd),
+                      back_to_list=True)
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
 # ---------- Таблица турнира (для игроков) ----------
