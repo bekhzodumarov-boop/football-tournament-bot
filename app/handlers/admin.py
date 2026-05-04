@@ -297,13 +297,13 @@ async def gd_kick_execute(call: CallbackQuery, session: AsyncSession, bot: Bot):
         except Exception as e:
             logger.warning(f"Cannot notify kicked player {player_id}: {e}")
 
-    # Уведомить первого из листа ожидания
-    from app.handlers.game_day import _notify_first_waitlist
-    await _notify_first_waitlist(session, game_day_id, bot)
+    # Автоматически перевести первого из листа ожидания в YES
+    from app.handlers.game_day import _promote_first_waitlist
+    await _promote_first_waitlist(session, game_day_id, bot)
 
     await call.message.edit_text(
         f"✅ <b>{player_name}</b> убран из записи.\n\n"
-        "Следующий игрок из листа ожидания получил уведомление.",
+        "Первый игрок из листа ожидания автоматически переведён в список участников.",
         reply_markup=game_day_action_kb(game_day_id)
     )
 

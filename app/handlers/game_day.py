@@ -525,10 +525,11 @@ async def decline_game(call: CallbackQuery, session: AsyncSession,
     await call.message.edit_text(t_g('join_declined', lang, gender))
 
     if was_confirmed:
-        await _notify_first_waitlist(session, game_day_id, bot)
+        await _promote_first_waitlist(session, game_day_id, bot)
 
 
-async def _notify_first_waitlist(session: AsyncSession, game_day_id: int, bot: Bot):
+async def _promote_first_waitlist(session: AsyncSession, game_day_id: int, bot: Bot):
+    """Автоматически переводит первого из листа ожидания в YES и уведомляет его."""
     result = await session.execute(
         select(Attendance)
         .options(selectinload(Attendance.player))
@@ -547,6 +548,11 @@ async def _notify_first_waitlist(session: AsyncSession, game_day_id: int, bot: B
     if not game_day:
         return
 
+    # Автоматически переводим в YES
+    first.response = AttendanceResponse.YES
+    first.responded_at = datetime.now()
+    await session.commit()
+
     try:
         lang = getattr(first.player, 'language', None) or 'ru'
         gender = getattr(first.player, 'gender', 'm') or 'm'
@@ -555,10 +561,12 @@ async def _notify_first_waitlist(session: AsyncSession, game_day_id: int, bot: B
             t_g('waitlist_promoted', lang, gender,
                 date=game_day.scheduled_at.strftime('%d.%m.%Y %H:%M'),
                 location=game_day.location),
-            reply_markup=join_game_kb(game_day_id, game_day.is_open, lang)
+            reply_markup=join_game_kb(game_day_id, game_day.is_open, lang,
+                                      webapp_url=settings.WEBAPP_URL),
+            parse_mode="HTML",
         )
     except Exception as e:
-        logger.warning(f"Cannot notify waitlist player {first.player.telegram_id}: {e}")
+        logger.warning(f"Cannot notify promoted waitlist player {first.player.telegram_id}: {e}")
 
 
 # ---------- Создание игрового дня ----------
@@ -760,7 +768,7 @@ async def confirm_attendance_no(call: CallbackQuery, session: AsyncSession,
     await call.message.edit_text(t('confirm_no_response', lang), parse_mode="HTML")
 
     if was_yes:
-        await _notify_first_waitlist(session, game_day_id, bot)
+        await _promote_first_waitlist(session, game_day_id, bot)
 
 
 async def _auto_announce(session: AsyncSession, bot: Bot,
