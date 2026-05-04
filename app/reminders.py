@@ -27,8 +27,8 @@ def set_bot(bot: Bot) -> None:
     _bot = bot
 
 
-async def _send_reminder(game_day_id: int, hours_before: int) -> None:
-    """Рассылка напоминания. Запускается APScheduler-ом."""
+async def _send_reminder_2h(game_day_id: int) -> None:
+    """Рассылка за 2 часа до игры. Запускается APScheduler-ом."""
     if not _bot:
         return
 
@@ -37,7 +37,6 @@ async def _send_reminder(game_day_id: int, hours_before: int) -> None:
         if not game_day or game_day.status == GameDayStatus.CANCELLED:
             return
 
-        date_str = game_day.scheduled_at.strftime("%d.%m.%Y")
         time_str = game_day.scheduled_at.strftime("%H:%M")
 
         result = await session.execute(
@@ -50,79 +49,34 @@ async def _send_reminder(game_day_id: int, hours_before: int) -> None:
         )
         attendances = result.scalars().all()
 
-        if hours_before >= 24:
-            # За 24ч — только тем, кто ещё не подтвердил, с кнопками
-            for att in attendances:
+        for att in attendances:
+            try:
                 if att.confirmed_final:
-                    continue
-                try:
+                    # Уже подтвердил — просто напоминание
+                    msg = (
+                        f"🔔 <b>Через 2 часа игра!</b>\n\n"
+                        f"🕐 {time_str}  📍 {game_day.location}\n\n"
+                        "Не опаздывай! ⚽"
+                    )
+                    await _bot.send_message(att.player.telegram_id, msg, parse_mode="HTML")
+                else:
+                    # Не подтвердил — напоминание + просьба подтвердить
                     lang = getattr(att.player, 'language', None) or 'ru'
-                    text = (
-                        f"📅 <b>Завтра игра!</b>\n\n"
-                        f"🕐 {time_str}  📍 {game_day.location}\n"
-                        f"💰 Взнос: {game_day.cost_per_player} сум.\n\n"
-                        "Подтверди участие — придёшь? ⚽"
+                    msg = (
+                        f"🔔 <b>Через 2 часа игра!</b>\n\n"
+                        f"🕐 {time_str}  📍 {game_day.location}\n\n"
+                        "Ты ещё не подтвердил участие.\n"
+                        "Пожалуйста, подтверди — придёшь?"
                     )
                     await _bot.send_message(
                         att.player.telegram_id,
-                        text,
-                        reply_markup=confirm_attendance_kb(game_day.id, lang, webapp_url=settings.WEBAPP_URL),
+                        msg,
+                        reply_markup=confirm_attendance_kb(game_day_id, lang, webapp_url=settings.WEBAPP_URL),
                         parse_mode="HTML",
                     )
-                    await asyncio.sleep(0.05)
-                except Exception:
-                    pass
-        elif hours_before >= 9:
-            # За 9ч — только тем, кто ещё не подтвердил, с кнопками
-            for att in attendances:
-                if att.confirmed_final:
-                    continue
-                try:
-                    lang = getattr(att.player, 'language', None) or 'ru'
-                    text = (
-                        f"⏰ <b>Сегодня игра!</b>\n\n"
-                        f"🕐 {time_str}  📍 {game_day.location}\n"
-                        f"💰 Взнос: {game_day.cost_per_player} сум.\n\n"
-                        "Подтверди участие — придёшь?"
-                    )
-                    await _bot.send_message(
-                        att.player.telegram_id,
-                        text,
-                        reply_markup=confirm_attendance_kb(game_day.id, lang, webapp_url=settings.WEBAPP_URL),
-                        parse_mode="HTML",
-                    )
-                    await asyncio.sleep(0.05)
-                except Exception:
-                    pass
-        else:
-            # За 2ч — разные сообщения в зависимости от подтверждения
-            for att in attendances:
-                try:
-                    if att.confirmed_final:
-                        # Уже подтвердил — просто напоминание
-                        msg = (
-                            f"🔔 <b>Через 2 часа игра!</b>\n\n"
-                            f"🕐 {time_str}  📍 {game_day.location}\n\n"
-                            "Не опаздывай! ⚽"
-                        )
-                        await _bot.send_message(att.player.telegram_id, msg)
-                    else:
-                        # Не подтвердил — напоминание + просьба подтвердить
-                        lang = getattr(att.player, 'language', None) or 'ru'
-                        msg = (
-                            f"🔔 <b>Через 2 часа игра!</b>\n\n"
-                            f"🕐 {time_str}  📍 {game_day.location}\n\n"
-                            "Ты ещё не подтвердил участие.\n"
-                            "Пожалуйста, подтверди — придёшь?"
-                        )
-                        await _bot.send_message(
-                            att.player.telegram_id,
-                            msg,
-                            reply_markup=confirm_attendance_kb(game_day_id, lang, webapp_url=settings.WEBAPP_URL),
-                        )
-                    await asyncio.sleep(0.05)
-                except Exception:
-                    pass
+                await asyncio.sleep(0.05)
+            except Exception:
+                pass
 
 
 async def _send_confirm_reminder(game_day_id: int, reminder_type: str) -> None:
@@ -288,53 +242,22 @@ def schedule_announcement(game_day: GameDay) -> None:
 
 
 def schedule_reminders(game_day: GameDay) -> None:
-    """Запланировать напоминания за 24ч, 2ч, накануне 20:00 и в день игры 12:00."""
+    """
+    Запланировать напоминания — 3 уведомления:
+      1. Накануне в 20:00 — всем записавшимся (YES): «Завтра игра, подтверди»
+      2. В день игры в 12:00 — только неподтвердившим: «Сегодня игра, подтверди»
+      3. За 2ч до игры — всем: подтвердившим просто напоминание, нет — с кнопкой
+    """
     now = datetime.now()
     gd_id = game_day.id
-    game_dt = game_day.scheduled_at  # naive Tashkent local time
+    game_dt = game_day.scheduled_at
 
-    # --- напоминание за 24ч: «завтра игра» ---
-    reminder_24h = game_dt - timedelta(hours=24)
-    # --- напоминание за 9ч: всем записавшимся ---
-    reminder_9h = game_dt - timedelta(hours=9)
-    # --- напоминание за 2ч: с проверкой подтверждения ---
-    reminder_2h = game_dt - timedelta(hours=2)
-
-    if reminder_24h > now:
-        scheduler.add_job(
-            _send_reminder,
-            trigger="date",
-            run_date=reminder_24h,
-            args=[gd_id, 24],
-            id=f"reminder_{gd_id}_24h",
-            replace_existing=True,
-        )
-
-    if reminder_9h > now:
-        scheduler.add_job(
-            _send_reminder,
-            trigger="date",
-            run_date=reminder_9h,
-            args=[gd_id, 9],
-            id=f"reminder_{gd_id}_9h",
-            replace_existing=True,
-        )
-
-    if reminder_2h > now:
-        scheduler.add_job(
-            _send_reminder,
-            trigger="date",
-            run_date=reminder_2h,
-            args=[gd_id, 2],
-            id=f"reminder_{gd_id}_2h",
-            replace_existing=True,
-        )
-
-    # --- новые напоминания с кнопками подтверждения ---
-    # накануне в 20:00
+    # 1. Накануне в 20:00
     day_before_20 = game_dt.replace(hour=20, minute=0, second=0, microsecond=0) - timedelta(days=1)
-    # в день игры в 12:00
+    # 2. В день игры в 12:00
     game_day_12 = game_dt.replace(hour=12, minute=0, second=0, microsecond=0)
+    # 3. За 2 часа до игры
+    reminder_2h = game_dt - timedelta(hours=2)
 
     if day_before_20 > now:
         scheduler.add_job(
@@ -353,6 +276,16 @@ def schedule_reminders(game_day: GameDay) -> None:
             run_date=game_day_12,
             args=[gd_id, "today"],
             id=f"remind_today_{gd_id}",
+            replace_existing=True,
+        )
+
+    if reminder_2h > now:
+        scheduler.add_job(
+            _send_reminder_2h,
+            trigger="date",
+            run_date=reminder_2h,
+            args=[gd_id],
+            id=f"reminder_{gd_id}_2h",
             replace_existing=True,
         )
 
