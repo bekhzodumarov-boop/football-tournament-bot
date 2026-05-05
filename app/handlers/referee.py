@@ -117,17 +117,14 @@ async def _get_attendees(session: AsyncSession, game_day_id: int) -> list[Player
     return result.scalars().all()
 
 
-async def _get_team_players(session: AsyncSession, team_id: int, exclude_bots: bool = False) -> list[Player]:
-    """Игроки конкретной команды (из TeamPlayer). exclude_bots=True скрывает бот-игроков."""
-    q = (
+async def _get_team_players(session: AsyncSession, team_id: int) -> list[Player]:
+    """Игроки конкретной команды (из TeamPlayer)."""
+    result = await session.execute(
         select(Player)
         .join(TeamPlayer, TeamPlayer.player_id == Player.id)
         .where(TeamPlayer.team_id == team_id)
         .order_by(Player.name)
     )
-    if exclude_bots:
-        q = q.where(Player.is_bot == False)
-    result = await session.execute(q)
     return result.scalars().all()
 
 
@@ -1017,8 +1014,7 @@ async def ref_goal_select_player(call: CallbackQuery, session: AsyncSession,
 
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
 
-    # Игроки конкретной команды (боты скрыты — гол нельзя записать на бота)
-    players = await _get_team_players(session, team_id, exclude_bots=True)
+    players = await _get_team_players(session, team_id)
     if not players:
         # Fallback: если состав не задан — показать всех записавшихся
         players = await _get_attendees(session, match.game_day_id)
@@ -1142,7 +1138,7 @@ async def ref_yellow_select_player(call: CallbackQuery, session: AsyncSession,
         return
 
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
-    players = await _get_team_players(session, team_id, exclude_bots=True)
+    players = await _get_team_players(session, team_id)
     if not players:
         players = await _get_attendees(session, match.game_day_id)
 
@@ -1227,7 +1223,7 @@ async def ref_red_select_player(call: CallbackQuery, session: AsyncSession,
         return
 
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
-    players = await _get_team_players(session, team_id, exclude_bots=True)
+    players = await _get_team_players(session, team_id)
     if not players:
         players = await _get_attendees(session, match.game_day_id)
 
