@@ -227,6 +227,10 @@ async def _run_migrations(conn):
         await conn.execute(text(
             "ALTER TABLE attendances ADD COLUMN IF NOT EXISTS is_late BOOLEAN NOT NULL DEFAULT FALSE"
         ))
+        # I-059: Игроки-боты (ghost players)
+        await conn.execute(text(
+            "ALTER TABLE players ADD COLUMN IF NOT EXISTS is_bot BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
         # user_activity, broadcast_logs создаются через Base.metadata.create_all — дополнительных миграций не требуется
 
 

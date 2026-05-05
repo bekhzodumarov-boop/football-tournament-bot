@@ -885,13 +885,13 @@ async def cb_top_scorers(call: CallbackQuery, player: Player | None, session: As
 
     from sqlalchemy import func
 
-    # Топ-10 бомбардиров в лиге (за все турниры)
+    # Топ-10 бомбардиров в лиге (за все турниры), без ботов
     query = (
         select(Player.id, Player.name, func.count(Goal.id).label("goals"))
         .join(Goal, Goal.player_id == Player.id)
         .join(Match, Goal.match_id == Match.id)
         .join(GameDay, Match.game_day_id == GameDay.id)
-        .where(Goal.goal_type == GoalType.GOAL)
+        .where(Goal.goal_type == GoalType.GOAL, Player.is_bot == False)
         .group_by(Player.id, Player.name)
         .order_by(func.count(Goal.id).desc())
         .limit(10)
@@ -928,7 +928,8 @@ async def cb_top_scorers(call: CallbackQuery, player: Player | None, session: As
             .join(Match, Goal.match_id == Match.id)
             .where(
                 Match.game_day_id == last_gd.id,
-                Goal.goal_type == GoalType.GOAL
+                Goal.goal_type == GoalType.GOAL,
+                Player.is_bot == False,
             )
             .group_by(Player.name)
             .order_by(func.count(Goal.id).desc())

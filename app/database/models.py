@@ -148,6 +148,7 @@ class Player(Base):
     games_played: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[PlayerStatus] = mapped_column(Enum(PlayerStatus), default=PlayerStatus.ACTIVE)
     is_referee: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_bot: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     language: Mapped[str] = mapped_column(String(5), default="ru", nullable=False, server_default="ru")
     gender: Mapped[str] = mapped_column(String(1), default="m", nullable=False, server_default="m")
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)

@@ -53,6 +53,11 @@ router = Router()
 # match_id → {bot, chat_id, message_id, started_at, duration_min, home, away, score_*}
 _active_timers: dict[int, dict] = {}
 
+# I-059: Ghost sub tracking
+# match_id → {real_player_id: bot_player_id}
+# Когда реальный игрок выходит вместо бота — его достижения записываются на бота
+_ghost_subs: dict[int, dict[int, int]] = {}
+
 
 # ─────────────────────────────────────────────
 #  FSM
@@ -1045,8 +1050,11 @@ async def ref_goal_record(call: CallbackQuery, session: AsyncSession,
         await call.answer("❌ Ошибка", show_alert=True)
         return
 
+    # I-059: Ghost sub — гол записывается на бота, не на реального игрока
+    effective_scorer_id = _ghost_subs.get(match_id, {}).get(scorer_id, scorer_id)
+
     session.add(Goal(
-        match_id=match_id, player_id=scorer_id, team_id=team_id,
+        match_id=match_id, player_id=effective_scorer_id, team_id=team_id,
         goal_type=GoalType.GOAL, scored_at=datetime.now(),
     ))
     if team_id == match.team_home_id:
@@ -1163,8 +1171,11 @@ async def ref_yellow_record(call: CallbackQuery, session: AsyncSession,
         await call.answer("❌ Ошибка", show_alert=True)
         return
 
+    # I-059: Ghost sub — карточка записывается на бота
+    effective_player_id = _ghost_subs.get(match_id, {}).get(player_id, player_id)
+
     session.add(Card(
-        match_id=match_id, player_id=player_id, team_id=team_id,
+        match_id=match_id, player_id=effective_player_id, team_id=team_id,
         card_type=CardType.YELLOW, issued_at=datetime.now(),
     ))
     await session.commit()
@@ -1248,8 +1259,11 @@ async def ref_red_record(call: CallbackQuery, session: AsyncSession,
         await call.answer("❌ Ошибка", show_alert=True)
         return
 
+    # I-059: Ghost sub — карточка записывается на бота
+    effective_player_id = _ghost_subs.get(match_id, {}).get(player_id, player_id)
+
     session.add(Card(
-        match_id=match_id, player_id=player_id, team_id=team_id,
+        match_id=match_id, player_id=effective_player_id, team_id=team_id,
         card_type=CardType.RED, issued_at=datetime.now(),
     ))
     await session.commit()
@@ -1261,7 +1275,7 @@ async def ref_red_record(call: CallbackQuery, session: AsyncSession,
         .join(Match, Match.id == Card.match_id)
         .where(
             Match.game_day_id == match.game_day_id,
-            Card.player_id == player_id,
+            Card.player_id == effective_player_id,
             Card.card_type == CardType.RED,
             Match.id != match_id,
         )
@@ -2673,9 +2687,20 @@ async def ref_sub_execute(call: CallbackQuery, session: AsyncSession,
     await session.commit()
     match = await _load_match(session, match_id)
 
+    # I-059: если выходящий — бот, трекаем ghost sub
+    if player_out.is_bot:
+        if match_id not in _ghost_subs:
+            _ghost_subs[match_id] = {}
+        _ghost_subs[match_id][player_in_id] = player_out_id
+        ghost_note = f"\n👻 Достижения {player_in.name} в этом матче → на {player_out.name}"
+    else:
+        # Если ранее player_in был ghost sub (вернулся в свою команду) — снять флаг
+        _ghost_subs.get(match_id, {}).pop(player_in_id, None)
+        ghost_note = ""
+
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
     await call.answer(
-        f"✅ {player_out.name} → {player_in.name} ({team_name})",
+        f"✅ {player_out.name} → {player_in.name} ({team_name}){ghost_note}",
         show_alert=True
     )
     await call.message.edit_text(

@@ -5508,3 +5508,144 @@ async def gd_ai_report(call: CallbackQuery, session: AsyncSession):
         full_text = full_text[:4090] + "…"
 
     await call.message.edit_text(full_text, reply_markup=builder.as_markup())
+
+
+# ══════════════════════════════════════════════════════
+#  ИГРОКИ-БОТЫ (I-059)
+# ══════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("gd_bots:"))
+async def gd_bots_menu(call: CallbackQuery, session: AsyncSession):
+    """Меню управления бот-игроками для игрового дня."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+
+    # Текущие команды и их составы
+    teams_res = await session.execute(
+        select(Team)
+        .options(selectinload(Team.players).selectinload(TeamPlayer.player))
+        .where(Team.game_day_id == game_day_id)
+    )
+    teams = teams_res.scalars().all()
+
+    if not teams:
+        await call.message.edit_text(
+            "⚠️ Сначала создай команды через «🎲 Авто-команды», «✋ Вручную» или «🎯 Basket-баланс».",
+            reply_markup=InlineKeyboardBuilder().row(
+                InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}")
+            ).as_markup()
+        )
+        return
+
+    lines = [f"👻 <b>Боты — Турнир #{game_day_id}</b>\n"]
+    for team in teams:
+        bots = [tp.player for tp in team.players if tp.player.is_bot]
+        real = [tp.player for tp in team.players if not tp.player.is_bot]
+        bot_names = ", ".join(p.name for p in bots) if bots else "—"
+        lines.append(f"{team.color_emoji} <b>{team.name}</b>: {len(real)} игр. + {len(bots)} ботов ({bot_names})")
+
+    lines.append("\nВыбери команду, в которую добавить бота:")
+
+    builder = InlineKeyboardBuilder()
+    for team in teams:
+        builder.row(InlineKeyboardButton(
+            text=f"{team.color_emoji} {team.name}",
+            callback_data=f"gd_bot_add:{game_day_id}:{team.id}"
+        ))
+
+    # Кнопка удалить всех ботов если есть хоть один
+    all_bots = [tp for t in teams for tp in t.players if tp.player.is_bot]
+    if all_bots:
+        builder.row(InlineKeyboardButton(
+            text="🗑 Удалить всех ботов",
+            callback_data=f"gd_bot_clear:{game_day_id}"
+        ))
+
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}"))
+    await call.message.edit_text("\n".join(lines), reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("gd_bot_add:"))
+async def gd_bot_add(call: CallbackQuery, session: AsyncSession):
+    """Добавить одного бота в выбранную команду."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("⏳ Создаю бота...")
+
+    parts = call.data.split(":")
+    game_day_id = int(parts[1])
+    team_id = int(parts[2])
+
+    team = await session.get(Team, team_id)
+    if not team:
+        await call.answer("❌ Команда не найдена.", show_alert=True)
+        return
+
+    # Посчитать сколько ботов уже в этой команде
+    bots_res = await session.execute(
+        select(TeamPlayer)
+        .join(Player, Player.id == TeamPlayer.player_id)
+        .where(TeamPlayer.team_id == team_id, Player.is_bot == True)
+    )
+    existing_bots = bots_res.scalars().all()
+    bot_num = len(existing_bots) + 1
+    bot_name = f"👻 Бот {bot_num} ({team.name})"
+
+    # Создать бот-игрока с fake telegram_id (отрицательный уникальный)
+    import time
+    fake_tg_id = -(int(time.time() * 1000) % 2_000_000_000)
+    bot_player = Player(
+        telegram_id=fake_tg_id,
+        name=bot_name,
+        position=Position.MIDFIELDER,
+        rating=5.0,
+        rating_provisional=False,
+        is_bot=True,
+        status=PlayerStatus.ACTIVE,
+        league_id=None,
+    )
+    session.add(bot_player)
+    await session.flush()
+
+    session.add(TeamPlayer(team_id=team_id, player_id=bot_player.id))
+    await session.commit()
+
+    await call.answer(f"✅ {bot_name} добавлен в команду {team.name}", show_alert=True)
+
+    # Перезагрузить меню
+    fake_call_data = f"gd_bots:{game_day_id}"
+    call.data = fake_call_data
+    await gd_bots_menu(call, session)
+
+
+@router.callback_query(F.data.startswith("gd_bot_clear:"))
+async def gd_bot_clear(call: CallbackQuery, session: AsyncSession):
+    """Удалить всех бот-игроков из всех команд этого игрового дня."""
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("⏳ Удаляю ботов...")
+
+    game_day_id = int(call.data.split(":")[1])
+
+    # Найти всех ботов через команды этого игрового дня
+    bots_res = await session.execute(
+        select(Player)
+        .join(TeamPlayer, TeamPlayer.player_id == Player.id)
+        .join(Team, Team.id == TeamPlayer.team_id)
+        .where(Team.game_day_id == game_day_id, Player.is_bot == True)
+    )
+    bots = bots_res.scalars().all()
+
+    for bot in bots:
+        await session.delete(bot)
+    await session.commit()
+
+    await call.answer(f"🗑 Удалено ботов: {len(bots)}", show_alert=True)
+    call.data = f"gd_bots:{game_day_id}"
+    await gd_bots_menu(call, session)
