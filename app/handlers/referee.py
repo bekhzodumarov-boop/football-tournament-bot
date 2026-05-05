@@ -53,10 +53,6 @@ router = Router()
 # match_id → {bot, chat_id, message_id, started_at, duration_min, home, away, score_*}
 _active_timers: dict[int, dict] = {}
 
-# I-059: Ghost sub tracking
-# match_id → {real_player_id: bot_player_id}
-# Когда реальный игрок выходит вместо бота — его достижения записываются на бота
-_ghost_subs: dict[int, dict[int, int]] = {}
 
 
 # ─────────────────────────────────────────────
@@ -121,14 +117,17 @@ async def _get_attendees(session: AsyncSession, game_day_id: int) -> list[Player
     return result.scalars().all()
 
 
-async def _get_team_players(session: AsyncSession, team_id: int) -> list[Player]:
-    """Игроки конкретной команды (из TeamPlayer)."""
-    result = await session.execute(
+async def _get_team_players(session: AsyncSession, team_id: int, exclude_bots: bool = False) -> list[Player]:
+    """Игроки конкретной команды (из TeamPlayer). exclude_bots=True скрывает бот-игроков."""
+    q = (
         select(Player)
         .join(TeamPlayer, TeamPlayer.player_id == Player.id)
         .where(TeamPlayer.team_id == team_id)
         .order_by(Player.name)
     )
+    if exclude_bots:
+        q = q.where(Player.is_bot == False)
+    result = await session.execute(q)
     return result.scalars().all()
 
 
@@ -1018,8 +1017,8 @@ async def ref_goal_select_player(call: CallbackQuery, session: AsyncSession,
 
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
 
-    # Игроки конкретной команды
-    players = await _get_team_players(session, team_id)
+    # Игроки конкретной команды (боты скрыты — гол нельзя записать на бота)
+    players = await _get_team_players(session, team_id, exclude_bots=True)
     if not players:
         # Fallback: если состав не задан — показать всех записавшихся
         players = await _get_attendees(session, match.game_day_id)
@@ -1050,11 +1049,8 @@ async def ref_goal_record(call: CallbackQuery, session: AsyncSession,
         await call.answer("❌ Ошибка", show_alert=True)
         return
 
-    # I-059: Ghost sub — гол записывается на бота, не на реального игрока
-    effective_scorer_id = _ghost_subs.get(match_id, {}).get(scorer_id, scorer_id)
-
     session.add(Goal(
-        match_id=match_id, player_id=effective_scorer_id, team_id=team_id,
+        match_id=match_id, player_id=scorer_id, team_id=team_id,
         goal_type=GoalType.GOAL, scored_at=datetime.now(),
     ))
     if team_id == match.team_home_id:
@@ -1146,7 +1142,7 @@ async def ref_yellow_select_player(call: CallbackQuery, session: AsyncSession,
         return
 
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
-    players = await _get_team_players(session, team_id)
+    players = await _get_team_players(session, team_id, exclude_bots=True)
     if not players:
         players = await _get_attendees(session, match.game_day_id)
 
@@ -1171,11 +1167,8 @@ async def ref_yellow_record(call: CallbackQuery, session: AsyncSession,
         await call.answer("❌ Ошибка", show_alert=True)
         return
 
-    # I-059: Ghost sub — карточка записывается на бота
-    effective_player_id = _ghost_subs.get(match_id, {}).get(player_id, player_id)
-
     session.add(Card(
-        match_id=match_id, player_id=effective_player_id, team_id=team_id,
+        match_id=match_id, player_id=player_id, team_id=team_id,
         card_type=CardType.YELLOW, issued_at=datetime.now(),
     ))
     await session.commit()
@@ -1234,7 +1227,7 @@ async def ref_red_select_player(call: CallbackQuery, session: AsyncSession,
         return
 
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
-    players = await _get_team_players(session, team_id)
+    players = await _get_team_players(session, team_id, exclude_bots=True)
     if not players:
         players = await _get_attendees(session, match.game_day_id)
 
@@ -1259,11 +1252,8 @@ async def ref_red_record(call: CallbackQuery, session: AsyncSession,
         await call.answer("❌ Ошибка", show_alert=True)
         return
 
-    # I-059: Ghost sub — карточка записывается на бота
-    effective_player_id = _ghost_subs.get(match_id, {}).get(player_id, player_id)
-
     session.add(Card(
-        match_id=match_id, player_id=effective_player_id, team_id=team_id,
+        match_id=match_id, player_id=player_id, team_id=team_id,
         card_type=CardType.RED, issued_at=datetime.now(),
     ))
     await session.commit()
@@ -1275,7 +1265,7 @@ async def ref_red_record(call: CallbackQuery, session: AsyncSession,
         .join(Match, Match.id == Card.match_id)
         .where(
             Match.game_day_id == match.game_day_id,
-            Card.player_id == effective_player_id,
+            Card.player_id == player_id,
             Card.card_type == CardType.RED,
             Match.id != match_id,
         )
@@ -2687,20 +2677,9 @@ async def ref_sub_execute(call: CallbackQuery, session: AsyncSession,
     await session.commit()
     match = await _load_match(session, match_id)
 
-    # I-059: если выходящий — бот, трекаем ghost sub
-    if player_out.is_bot:
-        if match_id not in _ghost_subs:
-            _ghost_subs[match_id] = {}
-        _ghost_subs[match_id][player_in_id] = player_out_id
-        ghost_note = f"\n👻 Достижения {player_in.name} в этом матче → на {player_out.name}"
-    else:
-        # Если ранее player_in был ghost sub (вернулся в свою команду) — снять флаг
-        _ghost_subs.get(match_id, {}).pop(player_in_id, None)
-        ghost_note = ""
-
     team_name = match.team_home.name if team_id == match.team_home_id else match.team_away.name
     await call.answer(
-        f"✅ {player_out.name} → {player_in.name} ({team_name}){ghost_note}",
+        f"✅ {player_out.name} → {player_in.name} ({team_name})",
         show_alert=True
     )
     await call.message.edit_text(
