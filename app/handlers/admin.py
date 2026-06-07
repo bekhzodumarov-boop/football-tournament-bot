@@ -698,6 +698,8 @@ async def gd_delete_execute(call: CallbackQuery, session: AsyncSession):
 
     await session.execute(sql_delete(Attendance).where(Attendance.game_day_id == game_day_id))
     await session.execute(sql_delete(Payment).where(Payment.game_day_id == game_day_id))
+    # BroadcastLog имеет FK на game_days — удаляем перед удалением GameDay
+    await session.execute(sql_delete(BroadcastLog).where(BroadcastLog.game_day_id == game_day_id))
 
     game_day = await session.get(GameDay, game_day_id)
     if game_day:
