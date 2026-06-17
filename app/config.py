@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     @classmethod
     def parse_admin_ids(cls, v):
         if isinstance(v, str):
+            v = v.strip()
+            # JSON array format: [163476178,358098800]
+            if v.startswith("["):
+                import json
+                return json.loads(v)
+            # Comma-separated format: 163476178,358098800
             return [int(x.strip()) for x in v.split(",") if x.strip()]
         if isinstance(v, int):
             return [v]
