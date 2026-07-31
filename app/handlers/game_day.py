@@ -119,12 +119,14 @@ async def show_next_game(event, session: AsyncSession, player: Player | None):
     lang = getattr(player, 'language', None) or 'ru' if player else 'ru'
     league_id = player.league_id if player else None
 
+    cutoff = datetime.now() - timedelta(hours=6)
     query = (
         select(GameDay)
         .options(selectinload(GameDay.attendances))
         .where(GameDay.status.in_([
             GameDayStatus.ANNOUNCED, GameDayStatus.CLOSED, GameDayStatus.IN_PROGRESS,
         ]))
+        .where(GameDay.scheduled_at >= cutoff)
         .order_by(GameDay.scheduled_at)
     )
     if league_id is not None:

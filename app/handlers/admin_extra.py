@@ -6,7 +6,7 @@
   - Моя лига
   - /create_league команда
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 import asyncio
 import logging
@@ -135,6 +135,7 @@ async def adm_active_games(call: CallbackQuery, session: AsyncSession):
     admin_player = p_res.scalar_one_or_none()
     league_id = admin_player.league_id if admin_player else None
 
+    cutoff = datetime.now() - timedelta(hours=6)
     query = (
         select(GameDay)
         .options(selectinload(GameDay.attendances))
@@ -143,6 +144,7 @@ async def adm_active_games(call: CallbackQuery, session: AsyncSession):
             GameDayStatus.CLOSED,
             GameDayStatus.IN_PROGRESS,
         ]))
+        .where(GameDay.scheduled_at >= cutoff)
         .order_by(GameDay.scheduled_at)
     )
     if league_id is not None:
