@@ -574,13 +574,112 @@ async def _promote_first_waitlist(session: AsyncSession, game_day_id: int, bot: 
 # ---------- Создание игрового дня ----------
 
 @router.callback_query(F.data == "admin_create_gameday")
-async def admin_create_gameday_start(call: CallbackQuery, state: FSMContext):
+async def admin_create_gameday_start(call: CallbackQuery, state: FSMContext, session: AsyncSession):
     if not settings.is_admin(call.from_user.id):
         await call.answer("⛔ Нет доступа", show_alert=True)
         return
     await call.answer()
-    from aiogram.types import InlineKeyboardButton
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    # Ищем последнюю игру этого админа — для шаблона
+    player_res = await session.execute(
+        select(Player).where(Player.telegram_id == call.from_user.id)
+    )
+    creator = player_res.scalar_one_or_none()
+    league_id = creator.league_id if creator else None
+
+    last_gd = None
+    if league_id is not None:
+        last_res = await session.execute(
+            select(GameDay)
+            .where(GameDay.league_id == league_id)
+            .order_by(GameDay.scheduled_at.desc())
+            .limit(1)
+        )
+        last_gd = last_res.scalar_one_or_none()
+
+    builder = InlineKeyboardBuilder()
+    if last_gd:
+        builder.row(InlineKeyboardButton(
+            text="📋 По шаблону",
+            callback_data="create_gd_template"
+        ))
+        builder.row(InlineKeyboardButton(
+            text="✏️ Новые данные",
+            callback_data="create_gd_new"
+        ))
+        builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back"))
+        await call.message.edit_text(
+            "📅 <b>Создание игрового дня</b>\n\n"
+            f"Последняя игра:\n"
+            f"📍 {last_gd.location}\n"
+            f"👥 Лимит: {last_gd.player_limit} чел.\n"
+            f"⏰ Время: {last_gd.scheduled_at.strftime('%H:%M')}\n\n"
+            "Использовать тот же шаблон или ввести новые данные?",
+            reply_markup=builder.as_markup()
+        )
+    else:
+        builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back"))
+        await call.message.edit_text(
+            "📅 <b>Создание игрового дня</b>\n\n"
+            "Введи дату и время игры в формате:\n"
+            "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n\n"
+            "Например: <code>28.04.2026 19:00</code>",
+            reply_markup=builder.as_markup()
+        )
+        await state.set_state(CreateGameDayFSM.waiting_date)
+
+
+@router.callback_query(F.data == "create_gd_template")
+async def create_gd_use_template(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    player_res = await session.execute(
+        select(Player).where(Player.telegram_id == call.from_user.id)
+    )
+    creator = player_res.scalar_one_or_none()
+    league_id = creator.league_id if creator else None
+
+    last_res = await session.execute(
+        select(GameDay)
+        .where(GameDay.league_id == league_id)
+        .order_by(GameDay.scheduled_at.desc())
+        .limit(1)
+    )
+    last_gd = last_res.scalar_one_or_none()
+    if not last_gd:
+        await call.message.edit_text("❌ Шаблон не найден.")
+        return
+
+    # Сохраняем данные шаблона в FSM — дата будет введена отдельно
+    await state.update_data(
+        location=last_gd.location,
+        player_limit=last_gd.player_limit,
+        use_template=True,
+    )
+
+    cancel_kb = InlineKeyboardBuilder()
+    cancel_kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back"))
+    await call.message.edit_text(
+        f"📋 <b>Шаблон загружен:</b>\n"
+        f"📍 {last_gd.location}\n"
+        f"👥 Лимит: {last_gd.player_limit} чел.\n\n"
+        f"Введи только дату и время новой игры:\n"
+        f"<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n\n"
+        f"Например: <code>25.06.2026 {last_gd.scheduled_at.strftime('%H:%M')}</code>",
+        reply_markup=cancel_kb.as_markup()
+    )
+    await state.set_state(CreateGameDayFSM.waiting_date)
+
+
+@router.callback_query(F.data == "create_gd_new")
+async def create_gd_new_data(call: CallbackQuery, state: FSMContext):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
     cancel_kb = InlineKeyboardBuilder()
     cancel_kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back"))
     await call.message.edit_text(
@@ -594,7 +693,7 @@ async def admin_create_gameday_start(call: CallbackQuery, state: FSMContext):
 
 
 @router.message(CreateGameDayFSM.waiting_date)
-async def create_gd_date(message: Message, state: FSMContext):
+async def create_gd_date(message: Message, state: FSMContext, session: AsyncSession, bot: Bot):
     try:
         dt = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
     except ValueError:
@@ -602,6 +701,13 @@ async def create_gd_date(message: Message, state: FSMContext):
         return
 
     await state.update_data(scheduled_at=dt.isoformat())
+    data = await state.get_data()
+
+    if data.get("use_template"):
+        # Шаблон: место и лимит уже есть — сразу создаём игровой день
+        await _finalize_game_day(message, state, session, bot, dt, data["location"], data["player_limit"])
+        return
+
     await message.answer(
         f"✅ Дата: <b>{dt.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
         "Введи адрес площадки:\n<i>Отмена: /cancel</i>"
@@ -636,27 +742,29 @@ async def create_gd_limit(message: Message, state: FSMContext,
 
     data = await state.get_data()
     scheduled_at = datetime.fromisoformat(data["scheduled_at"])
+    await _finalize_game_day(message, state, session, bot, scheduled_at, data["location"], limit)
+
+
+async def _finalize_game_day(message: Message, state: FSMContext, session: AsyncSession,
+                              bot: Bot, scheduled_at: datetime, location: str, limit: int):
+    """Создаёт GameDay и рассылает анонс. Вызывается из обоих путей (шаблон и ручной)."""
     deadline = scheduled_at - timedelta(hours=settings.REGISTRATION_DEADLINE_HOURS)
 
-    # Получить league_id из профиля создающего
     player_result = await session.execute(
         select(Player).where(Player.telegram_id == message.from_user.id)
     )
     creator = player_result.scalar_one_or_none()
     league_id = creator.league_id if creator else None
 
-    # Вычислить следующий порядковый номер турнира (минимальный свободный)
     tournament_number = await _next_tournament_number(session, league_id)
 
-    # Анонс за 48 часов до игры
     now = datetime.now()
     announce_at = scheduled_at - timedelta(hours=48)
-    # Если игра уже через <48ч — анонс немедленно, иначе по расписанию
     announce_immediately = announce_at <= now
 
     game_day = GameDay(
         scheduled_at=scheduled_at,
-        location=data["location"],
+        location=location,
         player_limit=limit,
         cost_per_player=0,
         registration_deadline=deadline,
@@ -674,18 +782,15 @@ async def create_gd_limit(message: Message, state: FSMContext,
     schedule_reminders(game_day)
 
     if announce_immediately:
-        # Игра через <48ч — анонс сразу
         await _auto_announce(session, bot, game_day, league_id)
         status_text = "📢 Анонс разослан всем игрокам лиги (игра через менее 48ч)"
     else:
-        # Запланировать анонс на 48ч до игры
         schedule_announcement(game_day)
         status_text = (
             f"📣 Анонс будет разослан автоматически\n"
             f"🗓 {announce_at.strftime('%d.%m.%Y в %H:%M')} (за 48ч до игры)"
         )
 
-    from app.keyboards.main_menu import admin_menu_kb
     await message.answer(
         f"✅ <b>{game_day.display_name} создан!</b>\n\n"
         f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
