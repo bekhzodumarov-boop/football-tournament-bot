@@ -320,7 +320,7 @@ def schedule_announcement(game_day: GameDay) -> None:
     import datetime as _dt
     tz_naive = lambda h, m: _dt.datetime(day_before.year, day_before.month, day_before.day, h, m)
 
-    times = [(10, 0, "high"), (15, 0, "mid"), (19, 0, "low")]
+    times = [(12, 0, "high"), (14, 0, "mid"), (16, 0, "low")]
     for hour, minute, tier in times:
         run_at = tz_naive(hour, minute)
         if run_at > now:
@@ -333,7 +333,7 @@ def schedule_announcement(game_day: GameDay) -> None:
                 replace_existing=True,
             )
 
-    group_run = tz_naive(21, 0)
+    group_run = tz_naive(18, 0)
     if group_run > now:
         scheduler.add_job(
             _send_group_announcement,

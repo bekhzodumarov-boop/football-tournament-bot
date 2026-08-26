@@ -100,14 +100,14 @@ def _game_card_text(gd, player: Player | None, player_atts: dict) -> str:
         import datetime as _dt
         now = datetime.now()
         day_before = (gd.scheduled_at - timedelta(days=1)).date()
-        open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 10, 0)
+        open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 12, 0)
         date_str = open_high.strftime("%d.%m") if now < open_high else "сегодня"
         reg_status = (
             f"\n\n📣 Регистрация будет доступна накануне игры ({date_str}):\n"
-            f"  🟢 Братья — 10:00\n"
-            f"  🟡 Друзья — 15:00\n"
-            f"  🔴 Гости — 19:00\n"
-            f"  📢 Все — 21:00"
+            f"  🟢 Братья — 12:00\n"
+            f"  🟡 Друзья — 14:00\n"
+            f"  🔴 Гости — 16:00\n"
+            f"  📢 Все — 18:00"
         )
 
     return (
@@ -389,15 +389,15 @@ async def join_pre(call: CallbackQuery, player: Player | None, session: AsyncSes
         now = datetime.now()
         game_dt = gd_for_tier.scheduled_at
         day_before = (game_dt - timedelta(days=1)).date()
-        open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 10, 0)
-        open_mid  = _dt.datetime(day_before.year, day_before.month, day_before.day, 15, 0)
-        open_low  = _dt.datetime(day_before.year, day_before.month, day_before.day, 19, 0)
+        open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 12, 0)
+        open_mid  = _dt.datetime(day_before.year, day_before.month, day_before.day, 14, 0)
+        open_low  = _dt.datetime(day_before.year, day_before.month, day_before.day, 16, 0)
         # Блокируем если регистрация ещё не открылась (до 10:00 накануне)
         if now < open_high:
             opens_date = open_high.strftime("%d.%m в %H:%M")
             await call.answer(
                 f"⏳ Регистрация откроется {opens_date}.\n"
-                f"🟢 Братья — 10:00 · 🟡 Друзья — 15:00 · 🔴 Гости — 19:00",
+                f"🟢 Братья — 12:00 · 🟡 Друзья — 14:00 · 🔴 Гости — 16:00",
                 show_alert=True,
             )
             return
@@ -839,13 +839,13 @@ async def _finalize_game_day(message: Message, state: FSMContext, session: Async
     import datetime as _dt
     game_date = scheduled_at.date()
     day_before = game_date - _dt.timedelta(days=1)
-    open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 10, 0)
+    open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 12, 0)
     status_text = (
         f"📣 Анонс разослан поэтапно накануне игры:\n"
-        f"  🟢 Братья — 10:00 ({open_high.strftime('%d.%m')})\n"
-        f"  🟡 Друзья — 15:00\n"
-        f"  🔴 Гости — 19:00\n"
-        f"  📢 Группа — 21:00"
+        f"  🟢 Братья — 12:00 ({open_high.strftime('%d.%m')})\n"
+        f"  🟡 Друзья — 14:00\n"
+        f"  🔴 Гости — 16:00\n"
+        f"  📢 Группа — 18:00"
     )
 
     await message.answer(
