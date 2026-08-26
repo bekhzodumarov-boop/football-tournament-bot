@@ -101,10 +101,14 @@ def _game_card_text(gd, player: Player | None, player_atts: dict) -> str:
         now = datetime.now()
         day_before = (gd.scheduled_at - timedelta(days=1)).date()
         open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 10, 0)
-        if now < open_high:
-            reg_status = f"\n⏳ Регистрация откроется {open_high.strftime('%d.%m в 10:00')}"
-        else:
-            reg_status = "\n⏳ Регистрация откроется сегодня в 10:00"
+        date_str = open_high.strftime("%d.%m") if now < open_high else "сегодня"
+        reg_status = (
+            f"\n\n📣 Регистрация будет доступна накануне игры ({date_str}):\n"
+            f"  🟢 Братья — 10:00\n"
+            f"  🟡 Друзья — 15:00\n"
+            f"  🔴 Гости — 19:00\n"
+            f"  📢 Все — 21:00"
+        )
 
     return (
         f"{name_line}"
