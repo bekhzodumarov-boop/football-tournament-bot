@@ -5646,11 +5646,18 @@ async def cmd_attendance_report(message: Message, session: AsyncSession):
         return
     league_id = pl.league_id
 
-    # Последние 10 завершённых игр лиги
+    # Последние 10 игр лиги, на которые были регистрации (любой статус)
+    from sqlalchemy import exists
     gd_res = await session.execute(
         select(GameDay)
         .where(GameDay.league_id == league_id)
-        .where(GameDay.status == GameDayStatus.FINISHED)
+        .where(
+            exists(
+                select(Attendance.id)
+                .where(Attendance.game_day_id == GameDay.id)
+                .where(Attendance.response == AttendanceResponse.YES)
+            )
+        )
         .order_by(GameDay.scheduled_at.desc())
         .limit(10)
     )
@@ -5695,13 +5702,13 @@ async def cmd_attendance_report(message: Message, session: AsyncSession):
 
     lines = [f"📊 *Посещаемость за последние {total} игр*\n"]
 
-    lines.append(f"🟢 *≥80% ({len(high)} чел.)*")
+    lines.append(f"🟢 *Братья — ≥80% ({len(high)} чел.)*")
     lines.extend(f"  {p}" for p in high) if high else lines.append("  —")
 
-    lines.append(f"\n🟡 *50–79% ({len(mid)} чел.)*")
+    lines.append(f"\n🟡 *Друзья — 50–79% ({len(mid)} чел.)*")
     lines.extend(f"  {p}" for p in mid) if mid else lines.append("  —")
 
-    lines.append(f"\n🔴 *<50% ({len(low)} чел.)*")
+    lines.append(f"\n🔴 *Гости — <50% ({len(low)} чел.)*")
     lines.extend(f"  {p}" for p in low) if low else lines.append("  —")
 
     await message.answer("\n".join(lines), parse_mode="Markdown")
