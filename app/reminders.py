@@ -410,6 +410,6 @@ async def reschedule_all_reminders() -> None:
         game_days = result.scalars().all()
         for gd in game_days:
             schedule_reminders(gd)
-            # восстановить тиерный анонс если регистрация ещё не открыта
-            if not gd.registration_open:
-                schedule_announcement(gd)
+            # восстанавливаем все тиерные задачи — schedule_announcement сама
+            # пропустит те, чьё время уже прошло (run_at > now)
+            schedule_announcement(gd)

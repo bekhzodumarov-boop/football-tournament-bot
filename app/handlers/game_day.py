@@ -363,21 +363,30 @@ async def join_pre(call: CallbackQuery, player: Player | None, session: AsyncSes
         await call.answer("⏳ Ты уже в листе ожидания!", show_alert=True)
         return
 
-    # Проверка тира: регистрация открывается в разное время
+    # Проверка тира: регистрация открывается в разное время накануне игры
     gd_for_tier = await session.get(GameDay, game_day_id)
     if gd_for_tier and gd_for_tier.league_id is not None:
         from app.reminders import _get_player_tier
+        import datetime as _dt
         now = datetime.now()
         game_dt = gd_for_tier.scheduled_at
         day_before = (game_dt - timedelta(days=1)).date()
-        import datetime as _dt
         open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 10, 0)
         open_mid  = _dt.datetime(day_before.year, day_before.month, day_before.day, 15, 0)
         open_low  = _dt.datetime(day_before.year, day_before.month, day_before.day, 19, 0)
-        # Проверяем только если сейчас в окне тиерного анонса (день перед игрой)
-        if open_high <= now < open_low:
+        # Блокируем если регистрация ещё не открылась (до 10:00 накануне)
+        if now < open_high:
+            opens_date = open_high.strftime("%d.%m в %H:%M")
+            await call.answer(
+                f"⏳ Регистрация откроется {opens_date}.\n"
+                f"🟢 Братья — 10:00 · 🟡 Друзья — 15:00 · 🔴 Гости — 19:00",
+                show_alert=True,
+            )
+            return
+        # Между 10:00 и 19:00 — проверяем категорию
+        if now < open_low:
             tier = await _get_player_tier(session, player.id, gd_for_tier.league_id)
-            if tier == "low" and now < open_low:
+            if tier == "low":
                 opens_at = open_low.strftime("%H:%M")
                 await call.answer(
                     f"🔴 Ты в категории Гости.\n"
@@ -789,10 +798,6 @@ async def _finalize_game_day(message: Message, state: FSMContext, session: Async
 
     tournament_number = await _next_tournament_number(session, league_id)
 
-    now = datetime.now()
-    announce_at = scheduled_at - timedelta(hours=48)
-    announce_immediately = announce_at <= now
-
     game_day = GameDay(
         scheduled_at=scheduled_at,
         location=location,
@@ -802,8 +807,8 @@ async def _finalize_game_day(message: Message, state: FSMContext, session: Async
         status=GameDayStatus.ANNOUNCED,
         league_id=league_id,
         tournament_number=tournament_number,
-        announce_at=announce_at,
-        registration_open=announce_immediately,
+        announce_at=None,
+        registration_open=False,  # открывается в 10:00 накануне через тиерный анонс
     )
     session.add(game_day)
     await session.commit()
@@ -811,16 +816,19 @@ async def _finalize_game_day(message: Message, state: FSMContext, session: Async
     await state.clear()
 
     schedule_reminders(game_day)
+    schedule_announcement(game_day)
 
-    if announce_immediately:
-        await _auto_announce(session, bot, game_day, league_id)
-        status_text = "📢 Анонс разослан всем игрокам лиги (игра через менее 48ч)"
-    else:
-        schedule_announcement(game_day)
-        status_text = (
-            f"📣 Анонс будет разослан автоматически\n"
-            f"🗓 {announce_at.strftime('%d.%m.%Y в %H:%M')} (за 48ч до игры)"
-        )
+    import datetime as _dt
+    game_date = scheduled_at.date()
+    day_before = game_date - _dt.timedelta(days=1)
+    open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 10, 0)
+    status_text = (
+        f"📣 Анонс разослан поэтапно накануне игры:\n"
+        f"  🟢 Братья — 10:00 ({open_high.strftime('%d.%m')})\n"
+        f"  🟡 Друзья — 15:00\n"
+        f"  🔴 Гости — 19:00\n"
+        f"  📢 Группа — 21:00"
+    )
 
     await message.answer(
         f"✅ <b>{game_day.display_name} создан!</b>\n\n"
