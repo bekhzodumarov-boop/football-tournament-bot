@@ -291,6 +291,10 @@ async def adm_past_detail(call: CallbackQuery, session: AsyncSession):
             lines.append(f"  ...и ещё {len(attendees) - 15} чел.")
 
     builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="✅ Подтвердить явку",
+        callback_data=f"gd_confirm_attendance:{game_day_id}"
+    ))
     if finished_matches:
         builder.row(InlineKeyboardButton(
             text="✏️ Редактировать результаты матчей",
@@ -5625,6 +5629,148 @@ async def gd_bot_add(call: CallbackQuery, session: AsyncSession):
     await gd_bots_menu(call, session)
 
 
+def _confirm_attendance_kb(game_day_id: int, attendances) -> InlineKeyboardMarkup:
+    """Клавиатура подтверждения явки: список зарегавшихся с кнопками ✅/❌."""
+    builder = InlineKeyboardBuilder()
+    yes_atts = [a for a in attendances if a.response == AttendanceResponse.YES]
+    waitlist = [a for a in attendances if a.response == AttendanceResponse.WAITLIST]
+    cancelled = [a for a in attendances if a.response == AttendanceResponse.NO_RESPONSE]
+
+    for a in yes_atts[:15]:
+        p = a.player
+        if a.actually_came is True:
+            mark = "✅"
+        elif a.actually_came is False:
+            mark = "❌"
+        else:
+            mark = "⬜"
+        builder.row(InlineKeyboardButton(
+            text=f"{mark} {p.name}",
+            callback_data=f"gd_mark_came:{game_day_id}:{a.id}:toggle"
+        ))
+
+    if waitlist:
+        builder.row(InlineKeyboardButton(text=f"— Резерв ({len(waitlist)}) —", callback_data="noop"))
+        for a in waitlist[:5]:
+            builder.row(InlineKeyboardButton(
+                text=f"🔶 {a.player.name}",
+                callback_data="noop"
+            ))
+
+    if cancelled:
+        builder.row(InlineKeyboardButton(text=f"— Отменили ({len(cancelled)}) —", callback_data="noop"))
+        for a in cancelled[:5]:
+            builder.row(InlineKeyboardButton(
+                text=f"🚫 {a.player.name}",
+                callback_data="noop"
+            ))
+
+    builder.row(InlineKeyboardButton(
+        text="🔙 К игре",
+        callback_data=f"adm_past_detail:{game_day_id}"
+    ))
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("gd_confirm_attendance:"))
+async def gd_confirm_attendance(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(
+        GameDay, game_day_id,
+        options=[selectinload(GameDay.attendances).selectinload(Attendance.player)]
+    )
+    if not game_day:
+        await call.message.edit_text("❌ Игра не найдена.")
+        return
+
+    yes_count = sum(1 for a in game_day.attendances if a.response == AttendanceResponse.YES)
+    confirmed = sum(1 for a in game_day.attendances
+                    if a.response == AttendanceResponse.YES and a.actually_came is True)
+    ghost = sum(1 for a in game_day.attendances
+                if a.response == AttendanceResponse.YES and a.actually_came is False)
+    unknown = yes_count - confirmed - ghost
+
+    text = (
+        f"✅ <b>Подтверждение явки — {game_day.display_name}</b>\n\n"
+        f"👥 Зарегались: {yes_count}\n"
+        f"✅ Пришли: {confirmed}  ❌ Не пришли: {ghost}  ⬜ Не отмечено: {unknown}\n\n"
+        "Нажми на имя, чтобы переключить статус:\n"
+        "⬜ → ✅ → ❌ → ⬜"
+    )
+
+    await call.message.edit_text(
+        text,
+        reply_markup=_confirm_attendance_kb(game_day_id, game_day.attendances),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("gd_mark_came:"))
+async def gd_mark_came(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    parts = call.data.split(":")  # gd_mark_came:{gd_id}:{att_id}:toggle
+    game_day_id = int(parts[1])
+    att_id = int(parts[2])
+
+    att = await session.get(Attendance, att_id, options=[selectinload(Attendance.player)])
+    if not att:
+        await call.answer("❌ Запись не найдена", show_alert=True)
+        return
+
+    # Переключаем: None → True → False → None
+    if att.actually_came is None:
+        att.actually_came = True
+        label = "✅ Пришёл"
+    elif att.actually_came is True:
+        att.actually_came = False
+        label = "❌ Не пришёл"
+    else:
+        att.actually_came = None
+        label = "⬜ Сброшено"
+
+    await session.commit()
+    await call.answer(f"{att.player.name}: {label}")
+
+    # Обновляем клавиатуру
+    game_day = await session.get(
+        GameDay, game_day_id,
+        options=[selectinload(GameDay.attendances).selectinload(Attendance.player)]
+    )
+    yes_count = sum(1 for a in game_day.attendances if a.response == AttendanceResponse.YES)
+    confirmed = sum(1 for a in game_day.attendances
+                    if a.response == AttendanceResponse.YES and a.actually_came is True)
+    ghost = sum(1 for a in game_day.attendances
+                if a.response == AttendanceResponse.YES and a.actually_came is False)
+    unknown = yes_count - confirmed - ghost
+
+    text = (
+        f"✅ <b>Подтверждение явки — {game_day.display_name}</b>\n\n"
+        f"👥 Зарегались: {yes_count}\n"
+        f"✅ Пришли: {confirmed}  ❌ Не пришли: {ghost}  ⬜ Не отмечено: {unknown}\n\n"
+        "Нажми на имя, чтобы переключить статус:\n"
+        "⬜ → ✅ → ❌ → ⬜"
+    )
+
+    await call.message.edit_text(
+        text,
+        reply_markup=_confirm_attendance_kb(game_day_id, game_day.attendances),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "noop")
+async def cb_noop(call: CallbackQuery):
+    await call.answer()
+
+
 async def _attendance_report_text(session: AsyncSession, admin_telegram_id: int) -> str:
     """Возвращает текст отчёта посещаемости или сообщение об ошибке."""
     from sqlalchemy import exists as sql_exists
@@ -5671,18 +5817,26 @@ async def _attendance_report_text(session: AsyncSession, admin_telegram_id: int)
     )
     attendances = att_res.scalars().all()
 
-    counts: dict[int, dict] = defaultdict(lambda: {"name": "", "count": 0})
+    counts: dict[int, dict] = defaultdict(lambda: {"name": "", "came": 0, "ghost": 0})
     for a in attendances:
         if a.player and not a.player.is_bot:
             counts[a.player_id]["name"] = a.player.name
-            counts[a.player_id]["count"] += 1
+            counts[a.player_id]["came"] += 1
+            if a.actually_came is False:
+                counts[a.player_id]["ghost"] += 1
 
-    sorted_players = sorted(counts.items(), key=lambda x: x[1]["count"], reverse=True)
+    sorted_players = sorted(
+        counts.items(),
+        key=lambda x: max(0, x[1]["came"] - x[1]["ghost"] * 2),
+        reverse=True,
+    )
 
     high, mid, low = [], [], []
     for pid, info in sorted_players:
-        pct = info["count"] / total * 100
-        entry = f"{info['name']} — {info['count']}/{total} ({pct:.0f}%)"
+        effective = max(0, info["came"] - info["ghost"] * 2)
+        pct = effective / total * 100
+        ghost_note = f" 👻×{info['ghost']}" if info["ghost"] else ""
+        entry = f"{info['name']} — {effective}/{total} ({pct:.0f}%){ghost_note}"
         if pct >= 80:
             high.append(entry)
         elif pct >= 50:

@@ -163,32 +163,77 @@ async def _send_confirm_reminder(game_day_id: int, reminder_type: str) -> None:
         await session.commit()
 
 
-async def _send_announcement(game_day_id: int) -> None:
+async def _get_player_tier(session, player_id: int, league_id: int) -> str:
     """
-    T-024: Разослать полноценный анонс с кнопками записи.
-    Вызывается APScheduler-ом в announce_at или сразу при создании.
+    Вычислить категорию игрока (high/mid/low) по посещаемости последних 10 игр лиги.
+    Учитывает санкции: actually_came=False при response=YES считается как −2.
+    """
+    from sqlalchemy import exists as sql_exists
+    from app.database.models import AttendanceResponse as AR
+
+    gd_res = await session.execute(
+        select(GameDay)
+        .where(GameDay.league_id == league_id)
+        .where(
+            sql_exists(
+                select(Attendance.id)
+                .where(Attendance.game_day_id == GameDay.id)
+                .where(Attendance.response == AR.YES)
+            )
+        )
+        .order_by(GameDay.scheduled_at.desc())
+        .limit(10)
+    )
+    game_days = gd_res.scalars().all()
+    if not game_days:
+        return "mid"
+
+    total = len(game_days)
+    gd_ids = [gd.id for gd in game_days]
+
+    att_res = await session.execute(
+        select(Attendance)
+        .where(Attendance.game_day_id.in_(gd_ids))
+        .where(Attendance.player_id == player_id)
+        .where(Attendance.response == AR.YES)
+    )
+    atts = att_res.scalars().all()
+
+    came = sum(1 for a in atts)
+    ghosts = sum(1 for a in atts if a.actually_came is False)
+    effective = max(0, came - ghosts * 2)
+    pct = effective / total * 100
+
+    if pct >= 80:
+        return "high"
+    elif pct >= 50:
+        return "mid"
+    return "low"
+
+
+async def _send_tiered_announcement(game_day_id: int, tier: str) -> None:
+    """
+    Рассылка анонса игрокам определённой категории.
+    tier: "high" (Братья 10:00), "mid" (Друзья 15:00), "low" (Гости 19:00).
+    При tier="high" также открывает регистрацию.
     """
     if not _bot:
         return
 
-    async with AsyncSessionFactory() as session:
-        from sqlalchemy.orm import selectinload as _sil
-        from app.database.models import Player, PlayerLeague, PlayerStatus
-        from sqlalchemy import update as sa_update
+    from app.database.models import Player, PlayerLeague, PlayerStatus
 
+    async with AsyncSessionFactory() as session:
         game_day = await session.get(GameDay, game_day_id)
         if not game_day or game_day.status == GameDayStatus.CANCELLED:
             return
 
-        # Открыть регистрацию
-        game_day.registration_open = True
-        await session.commit()
+        if tier == "high":
+            game_day.registration_open = True
+            await session.commit()
 
-        # Найти всех активных игроков лиги
         if game_day.league_id is not None:
-            from sqlalchemy import select as sa_select
             result = await session.execute(
-                sa_select(Player)
+                select(Player)
                 .join(PlayerLeague, PlayerLeague.player_id == Player.id)
                 .where(
                     PlayerLeague.league_id == game_day.league_id,
@@ -196,12 +241,12 @@ async def _send_announcement(game_day_id: int) -> None:
                 )
             )
         else:
-            from sqlalchemy import select as sa_select
             result = await session.execute(
-                sa_select(Player).where(Player.status == PlayerStatus.ACTIVE)
+                select(Player).where(Player.status == PlayerStatus.ACTIVE)
             )
         players = result.scalars().all()
 
+        tier_labels = {"high": "🟢 Братья", "mid": "🟡 Друзья", "low": "🔴 Гости"}
         date_str = game_day.scheduled_at.strftime("%d.%m.%Y %H:%M")
         text = (
             f"🎉 <b>Регистрация открыта — {game_day.display_name}!</b>\n\n"
@@ -211,8 +256,12 @@ async def _send_announcement(game_day_id: int) -> None:
             "Успей записаться! 👇"
         )
 
+        sent = 0
         for p in players:
             try:
+                player_tier = await _get_player_tier(session, p.id, game_day.league_id)
+                if player_tier != tier:
+                    continue
                 lang = getattr(p, "language", None) or "ru"
                 await _bot.send_message(
                     p.telegram_id,
@@ -220,23 +269,78 @@ async def _send_announcement(game_day_id: int) -> None:
                     reply_markup=join_game_kb(game_day.id, True, lang, webapp_url=settings.WEBAPP_URL),
                     parse_mode="HTML",
                 )
+                sent += 1
                 await asyncio.sleep(0.05)
             except Exception:
                 pass
 
 
-def schedule_announcement(game_day: GameDay) -> None:
-    """T-024: Запланировать рассылку анонса на announce_at."""
-    if not game_day.announce_at:
+async def _send_group_announcement(game_day_id: int) -> None:
+    """Публичный анонс в группу в 21:00 накануне игры."""
+    if not _bot or not settings.GROUP_CHAT_ID:
         return
+
+    async with AsyncSessionFactory() as session:
+        game_day = await session.get(GameDay, game_day_id)
+        if not game_day or game_day.status == GameDayStatus.CANCELLED:
+            return
+
+        date_str = game_day.scheduled_at.strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"⚽ <b>{game_day.display_name} — завтра!</b>\n\n"
+            f"📅 {date_str}\n"
+            f"📍 {game_day.location}\n"
+            f"👥 Мест: {game_day.player_limit}\n\n"
+            "Записывайся через бот! 👇"
+        )
+        try:
+            await _bot.send_message(
+                settings.GROUP_CHAT_ID,
+                text,
+                reply_markup=join_game_kb(game_day.id, True, "ru", webapp_url=settings.WEBAPP_URL),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+
+def schedule_announcement(game_day: GameDay) -> None:
+    """
+    Тиерная рассылка анонса накануне игры:
+      10:00 — Братья (+ открытие регистрации)
+      15:00 — Друзья
+      19:00 — Гости
+      21:00 — публичный пост в группу
+    """
     now = datetime.now()
-    if game_day.announce_at > now:
+    gd_id = game_day.id
+    game_dt = game_day.scheduled_at
+    day_before = game_dt.date() - __import__("datetime").timedelta(days=1)
+
+    import datetime as _dt
+    tz_naive = lambda h, m: _dt.datetime(day_before.year, day_before.month, day_before.day, h, m)
+
+    times = [(10, 0, "high"), (15, 0, "mid"), (19, 0, "low")]
+    for hour, minute, tier in times:
+        run_at = tz_naive(hour, minute)
+        if run_at > now:
+            scheduler.add_job(
+                _send_tiered_announcement,
+                trigger="date",
+                run_date=run_at,
+                args=[gd_id, tier],
+                id=f"announce_{gd_id}_{tier}",
+                replace_existing=True,
+            )
+
+    group_run = tz_naive(21, 0)
+    if group_run > now:
         scheduler.add_job(
-            _send_announcement,
+            _send_group_announcement,
             trigger="date",
-            run_date=game_day.announce_at,
-            args=[game_day.id],
-            id=f"announce_{game_day.id}",
+            run_date=group_run,
+            args=[gd_id],
+            id=f"announce_{gd_id}_group",
             replace_existing=True,
         )
 
@@ -306,6 +410,6 @@ async def reschedule_all_reminders() -> None:
         game_days = result.scalars().all()
         for gd in game_days:
             schedule_reminders(gd)
-            # T-024: восстановить запланированный анонс если регистрация ещё не открыта
-            if not gd.registration_open and gd.announce_at and gd.announce_at > now:
+            # восстановить тиерный анонс если регистрация ещё не открыта
+            if not gd.registration_open:
                 schedule_announcement(gd)

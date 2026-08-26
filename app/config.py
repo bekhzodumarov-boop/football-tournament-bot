@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # Telegram channel ID для публикации итогов (например: @mychannel или -1001234567890)
     CHANNEL_ID: str = ""
 
+    # Telegram group chat ID для публичного анонса игры в 21:00 накануне
+    GROUP_CHAT_ID: str = ""
+
     # Google Sheets — JSON-строка сервисного аккаунта и ID таблицы
     GOOGLE_CREDENTIALS_JSON: str = ""
     GOOGLE_SHEET_ID: str = ""
