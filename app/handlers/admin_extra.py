@@ -5625,6 +5625,88 @@ async def gd_bot_add(call: CallbackQuery, session: AsyncSession):
     await gd_bots_menu(call, session)
 
 
+@router.message(Command("attendance_report"))
+async def cmd_attendance_report(message: Message, session: AsyncSession):
+    """Посещаемость игроков за последние 10 игр. Только для админов."""
+    if not settings.is_admin(message.from_user.id):
+        return
+
+    # Получаем ID лиги текущего админа
+    pl_res = await session.execute(
+        select(PlayerLeague)
+        .where(PlayerLeague.player_id == (
+            select(Player.id).where(Player.telegram_id == message.from_user.id).scalar_subquery()
+        ))
+        .where(PlayerLeague.role == LeagueRole.ADMIN)
+        .limit(1)
+    )
+    pl = pl_res.scalar_one_or_none()
+    if not pl:
+        await message.answer("❌ Лига не найдена")
+        return
+    league_id = pl.league_id
+
+    # Последние 10 завершённых игр лиги
+    gd_res = await session.execute(
+        select(GameDay)
+        .where(GameDay.league_id == league_id)
+        .where(GameDay.status == GameDayStatus.FINISHED)
+        .order_by(GameDay.scheduled_at.desc())
+        .limit(10)
+    )
+    game_days = gd_res.scalars().all()
+    if not game_days:
+        await message.answer("Нет завершённых игр.")
+        return
+
+    gd_ids = [gd.id for gd in game_days]
+    total = len(gd_ids)
+
+    # Все YES-отметки для этих игр
+    att_res = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(Attendance.game_day_id.in_(gd_ids))
+        .where(Attendance.response == AttendanceResponse.YES)
+    )
+    attendances = att_res.scalars().all()
+
+    # Считаем по игрокам
+    from collections import defaultdict
+    counts: dict[int, dict] = defaultdict(lambda: {"name": "", "count": 0})
+    for a in attendances:
+        if a.player and not a.player.is_bot:
+            counts[a.player_id]["name"] = a.player.name
+            counts[a.player_id]["count"] += 1
+
+    # Сортируем по убыванию
+    sorted_players = sorted(counts.items(), key=lambda x: x[1]["count"], reverse=True)
+
+    high, mid, low = [], [], []
+    for pid, info in sorted_players:
+        pct = info["count"] / total * 100
+        entry = f"{info['name']} — {info['count']}/{total} ({pct:.0f}%)"
+        if pct >= 80:
+            high.append(entry)
+        elif pct >= 50:
+            mid.append(entry)
+        else:
+            low.append(entry)
+
+    lines = [f"📊 *Посещаемость за последние {total} игр*\n"]
+
+    lines.append(f"🟢 *≥80% ({len(high)} чел.)*")
+    lines.extend(f"  {p}" for p in high) if high else lines.append("  —")
+
+    lines.append(f"\n🟡 *50–79% ({len(mid)} чел.)*")
+    lines.extend(f"  {p}" for p in mid) if mid else lines.append("  —")
+
+    lines.append(f"\n🔴 *<50% ({len(low)} чел.)*")
+    lines.extend(f"  {p}" for p in low) if low else lines.append("  —")
+
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
 @router.callback_query(F.data.startswith("gd_bot_clear:"))
 async def gd_bot_clear(call: CallbackQuery, session: AsyncSession):
     """Удалить всех бот-игроков из всех команд этого игрового дня."""
