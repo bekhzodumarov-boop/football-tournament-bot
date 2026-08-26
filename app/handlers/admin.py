@@ -139,10 +139,16 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
         action_kb = game_day_action_kb(game_day_id)
         from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
         builder = IKB()
-        builder.row(InlineKeyboardButton(
-            text="❌ Убрать игрока из записи",
-            callback_data=f"gd_kick_list:{game_day_id}"
-        ))
+        builder.row(
+            InlineKeyboardButton(
+                text="❌ Убрать игрока из записи",
+                callback_data=f"gd_kick_list:{game_day_id}"
+            ),
+            InlineKeyboardButton(
+                text="⏱ Время записи",
+                callback_data=f"gd_reg_times:{game_day_id}"
+            ),
+        )
         for row in action_kb.inline_keyboard:
             builder.row(*row)
 
@@ -155,6 +161,60 @@ async def gd_players(call: CallbackQuery, session: AsyncSession):
     except Exception as e:
         logger.error(f"gd_players error: {e}", exc_info=True)
         await call.answer(f"❌ Ошибка: {type(e).__name__}: {e}", show_alert=True)
+
+
+# ---------- Время записи игроков ----------
+
+@router.callback_query(F.data.startswith("gd_reg_times:"))
+async def gd_reg_times(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+
+    game_day_id = int(call.data.split(":")[1])
+    game_day = await session.get(GameDay, game_day_id)
+
+    att_res = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(Attendance.game_day_id == game_day_id)
+        .where(Attendance.response == AttendanceResponse.YES)
+        .order_by(Attendance.responded_at)
+    )
+    attendances = att_res.scalars().all()
+
+    gd_name = game_day.display_name if game_day else f"#{game_day_id}"
+    lines = [f"⏱ <b>Время записи — {gd_name}</b>\n"]
+
+    for i, att in enumerate(attendances, 1):
+        p = att.player
+        if not p:
+            continue
+        time_str = att.responded_at.strftime("%H:%M") if att.responded_at else "—"
+        lines.append(f"{i}. <b>{p.name}</b> — {time_str}")
+
+    waitlist_res = await session.execute(
+        select(Attendance)
+        .options(selectinload(Attendance.player))
+        .where(Attendance.game_day_id == game_day_id)
+        .where(Attendance.response == AttendanceResponse.WAITLIST)
+        .order_by(Attendance.responded_at)
+    )
+    waitlist = waitlist_res.scalars().all()
+    if waitlist:
+        lines.append(f"\n⏳ <b>Резерв:</b>")
+        for i, att in enumerate(waitlist, 1):
+            p = att.player
+            if not p:
+                continue
+            time_str = att.responded_at.strftime("%H:%M") if att.responded_at else "—"
+            lines.append(f"{i}. {p.name} — {time_str}")
+
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔙 Назад", callback_data=f"gd_players:{game_day_id}")
+    ]])
+    await call.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb)
 
 
 # ---------- Убрать игрока из записи ----------
