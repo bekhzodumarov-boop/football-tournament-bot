@@ -363,6 +363,37 @@ async def join_pre(call: CallbackQuery, player: Player | None, session: AsyncSes
         await call.answer("⏳ Ты уже в листе ожидания!", show_alert=True)
         return
 
+    # Проверка тира: регистрация открывается в разное время
+    gd_for_tier = await session.get(GameDay, game_day_id)
+    if gd_for_tier and gd_for_tier.league_id is not None:
+        from app.reminders import _get_player_tier
+        now = datetime.now()
+        game_dt = gd_for_tier.scheduled_at
+        day_before = (game_dt - timedelta(days=1)).date()
+        import datetime as _dt
+        open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 10, 0)
+        open_mid  = _dt.datetime(day_before.year, day_before.month, day_before.day, 15, 0)
+        open_low  = _dt.datetime(day_before.year, day_before.month, day_before.day, 19, 0)
+        # Проверяем только если сейчас в окне тиерного анонса (день перед игрой)
+        if open_high <= now < open_low:
+            tier = await _get_player_tier(session, player.id, gd_for_tier.league_id)
+            if tier == "low" and now < open_low:
+                opens_at = open_low.strftime("%H:%M")
+                await call.answer(
+                    f"🔴 Ты в категории Гости.\n"
+                    f"Твоя регистрация откроется сегодня в {opens_at}.",
+                    show_alert=True,
+                )
+                return
+            if tier == "mid" and now < open_mid:
+                opens_at = open_mid.strftime("%H:%M")
+                await call.answer(
+                    f"🟡 Ты в категории Друзья.\n"
+                    f"Твоя регистрация откроется сегодня в {opens_at}.",
+                    show_alert=True,
+                )
+                return
+
     lang = getattr(player, 'language', None) or 'ru'
     agreement = REGLAMENT_AGREEMENT_EN if lang == 'en' else REGLAMENT_AGREEMENT
     await call.message.edit_text(
