@@ -114,6 +114,7 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="📋 История рассылок", callback_data="admin_broadcast_history"),
+        InlineKeyboardButton(text="📊 Посещаемость", callback_data="admin_attendance_report"),
     )
     builder.row(
         InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu"),

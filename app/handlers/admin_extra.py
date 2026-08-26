@@ -5625,34 +5625,29 @@ async def gd_bot_add(call: CallbackQuery, session: AsyncSession):
     await gd_bots_menu(call, session)
 
 
-@router.message(Command("attendance_report"))
-async def cmd_attendance_report(message: Message, session: AsyncSession):
-    """Посещаемость игроков за последние 10 игр. Только для админов."""
-    if not settings.is_admin(message.from_user.id):
-        return
+async def _attendance_report_text(session: AsyncSession, admin_telegram_id: int) -> str:
+    """Возвращает текст отчёта посещаемости или сообщение об ошибке."""
+    from sqlalchemy import exists as sql_exists
+    from collections import defaultdict
 
-    # Получаем ID лиги текущего админа
     pl_res = await session.execute(
         select(PlayerLeague)
         .where(PlayerLeague.player_id == (
-            select(Player.id).where(Player.telegram_id == message.from_user.id).scalar_subquery()
+            select(Player.id).where(Player.telegram_id == admin_telegram_id).scalar_subquery()
         ))
         .where(PlayerLeague.role == LeagueRole.ADMIN)
         .limit(1)
     )
     pl = pl_res.scalar_one_or_none()
     if not pl:
-        await message.answer("❌ Лига не найдена")
-        return
+        return "❌ Лига не найдена"
     league_id = pl.league_id
 
-    # Последние 10 игр лиги, на которые были регистрации (любой статус)
-    from sqlalchemy import exists
     gd_res = await session.execute(
         select(GameDay)
         .where(GameDay.league_id == league_id)
         .where(
-            exists(
+            sql_exists(
                 select(Attendance.id)
                 .where(Attendance.game_day_id == GameDay.id)
                 .where(Attendance.response == AttendanceResponse.YES)
@@ -5663,13 +5658,11 @@ async def cmd_attendance_report(message: Message, session: AsyncSession):
     )
     game_days = gd_res.scalars().all()
     if not game_days:
-        await message.answer("Нет завершённых игр.")
-        return
+        return "Нет игр с регистрациями."
 
     gd_ids = [gd.id for gd in game_days]
     total = len(gd_ids)
 
-    # Все YES-отметки для этих игр
     att_res = await session.execute(
         select(Attendance)
         .options(selectinload(Attendance.player))
@@ -5678,15 +5671,12 @@ async def cmd_attendance_report(message: Message, session: AsyncSession):
     )
     attendances = att_res.scalars().all()
 
-    # Считаем по игрокам
-    from collections import defaultdict
     counts: dict[int, dict] = defaultdict(lambda: {"name": "", "count": 0})
     for a in attendances:
         if a.player and not a.player.is_bot:
             counts[a.player_id]["name"] = a.player.name
             counts[a.player_id]["count"] += 1
 
-    # Сортируем по убыванию
     sorted_players = sorted(counts.items(), key=lambda x: x[1]["count"], reverse=True)
 
     high, mid, low = [], [], []
@@ -5711,7 +5701,20 @@ async def cmd_attendance_report(message: Message, session: AsyncSession):
     lines.append(f"\n🔴 *Гости — <50% ({len(low)} чел.)*")
     lines.extend(f"  {p}" for p in low) if low else lines.append("  —")
 
-    await message.answer("\n".join(lines), parse_mode="Markdown")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "admin_attendance_report")
+async def cb_attendance_report(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer()
+    text = await _attendance_report_text(session, call.from_user.id)
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔙 Панель администратора", callback_data="admin_back")
+    ]])
+    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=back_kb)
 
 
 @router.callback_query(F.data.startswith("gd_bot_clear:"))
