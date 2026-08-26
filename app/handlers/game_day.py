@@ -93,6 +93,19 @@ def _game_card_text(gd, player: Player | None, player_atts: dict) -> str:
 
     status_icon = "🔴 LIVE" if gd.status == GameDayStatus.IN_PROGRESS else "📅"
     name_line = f"🏆 <b>{gd.display_name}</b>\n" if gd.tournament_number else ""
+
+    # Строка о времени открытия регистрации
+    reg_status = ""
+    if not gd.registration_open and gd.status == GameDayStatus.ANNOUNCED:
+        import datetime as _dt
+        now = datetime.now()
+        day_before = (gd.scheduled_at - timedelta(days=1)).date()
+        open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 10, 0)
+        if now < open_high:
+            reg_status = f"\n⏳ Регистрация откроется {open_high.strftime('%d.%m в 10:00')}"
+        else:
+            reg_status = "\n⏳ Регистрация откроется сегодня в 10:00"
+
     return (
         f"{name_line}"
         f"{status_icon} {gd.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
@@ -100,6 +113,7 @@ def _game_card_text(gd, player: Player | None, player_atts: dict) -> str:
         f"👥 Записалось: <b>{registered}/{gd.player_limit}</b>"
         + (f" (свободно: {spots_left})" if spots_left > 0 else " (<b>мест нет</b>)")
         + (f"\n📋 Ожидание: {waitlist} чел." if waitlist > 0 else "")
+        + reg_status
         + player_status
     )
 
