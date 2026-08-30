@@ -410,6 +410,12 @@ async def reschedule_all_reminders() -> None:
         game_days = result.scalars().all()
         for gd in game_days:
             schedule_reminders(gd)
-            # восстанавливаем все тиерные задачи — schedule_announcement сама
-            # пропустит те, чьё время уже прошло (run_at > now)
             schedule_announcement(gd)
+            # Если регистрация закрыта, а 12:00 накануне уже прошло — открыть сейчас
+            if not gd.registration_open:
+                import datetime as _dt
+                day_before = (gd.scheduled_at - timedelta(days=1)).date()
+                open_high = _dt.datetime(day_before.year, day_before.month, day_before.day, 12, 0)
+                if now >= open_high:
+                    gd.registration_open = True
+        await session.commit()
