@@ -359,11 +359,10 @@ async def gd_standings(call: CallbackQuery, session: AsyncSession,
 
 @router.callback_query(F.data.startswith("join_pre:"))
 async def join_pre(call: CallbackQuery, player: Player | None, session: AsyncSession):
-    await call.answer()
     game_day_id = int(call.data.split(":")[1])
 
     if not player:
-        await call.message.answer("❌ Сначала зарегистрируйся: /register")
+        await call.answer("❌ Сначала зарегистрируйся: /register", show_alert=True)
         return
 
     # Проверить — не записан ли уже
@@ -421,6 +420,7 @@ async def join_pre(call: CallbackQuery, player: Player | None, session: AsyncSes
                 )
                 return
 
+    await call.answer()
     lang = getattr(player, 'language', None) or 'ru'
     agreement = REGLAMENT_AGREEMENT_EN if lang == 'en' else REGLAMENT_AGREEMENT
     await call.message.edit_text(
