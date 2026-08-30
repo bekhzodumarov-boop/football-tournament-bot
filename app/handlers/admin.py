@@ -382,26 +382,24 @@ async def gd_announce(call: CallbackQuery, session: AsyncSession):
     if not game_day:
         return
 
-    league_id = game_day.league_id
-    players = await _get_league_players(session, league_id, active_only=True)
-    player_count = len(players)
-
     confirm_kb = InlineKeyboardBuilder()
     confirm_kb.row(
-        InlineKeyboardButton(
-            text=f"📢 Да, разослать {player_count} игрокам",
-            callback_data=f"gd_announce_ok:{game_day_id}"
-        )
+        InlineKeyboardButton(text="🟢 Братья", callback_data=f"gd_announce_tier:{game_day_id}:high"),
+        InlineKeyboardButton(text="🟡 Друзья", callback_data=f"gd_announce_tier:{game_day_id}:mid"),
+    )
+    confirm_kb.row(
+        InlineKeyboardButton(text="🔴 Гости", callback_data=f"gd_announce_tier:{game_day_id}:low"),
+        InlineKeyboardButton(text="📢 Всем", callback_data=f"gd_announce_tier:{game_day_id}:all"),
     )
     confirm_kb.row(
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"gd_players:{game_day_id}")
     )
 
     await call.message.edit_text(
-        f"📢 <b>Разослать анонс?</b>\n\n"
+        f"📢 <b>Разослать анонс — {game_day.display_name}</b>\n\n"
         f"📅 {game_day.scheduled_at.strftime('%d.%m.%Y %H:%M')}\n"
         f"📍 {game_day.location}\n\n"
-        f"Сообщение получат <b>{player_count}</b> активных игроков лиги.",
+        "Кому отправить анонс?",
         reply_markup=confirm_kb.as_markup()
     )
 
@@ -451,6 +449,38 @@ async def gd_announce_execute(call: CallbackQuery, session: AsyncSession, bot: B
             logger.warning(f"Cannot send announce to {player.telegram_id}: {e}")
 
     await call.message.answer(f"✅ Анонс отправлен {sent} игрокам. Регистрация открыта.")
+
+
+@router.callback_query(F.data.startswith("gd_announce_tier:"))
+async def gd_announce_tier(call: CallbackQuery, session: AsyncSession):
+    if not settings.is_admin(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
+    await call.answer("Рассылаю...", show_alert=False)
+
+    parts = call.data.split(":")
+    game_day_id = int(parts[1])
+    tier = parts[2]  # high / mid / low / all
+
+    from app.reminders import _send_tiered_announcement, _send_group_announcement
+
+    game_day = await session.get(GameDay, game_day_id)
+    if not game_day:
+        return
+
+    if not game_day.registration_open:
+        game_day.registration_open = True
+        await session.commit()
+
+    if tier == "all":
+        for t in ("high", "mid", "low"):
+            await _send_tiered_announcement(game_day_id, t)
+        await _send_group_announcement(game_day_id)
+        await call.message.answer("✅ Анонс разослан всем категориям + в группу.")
+    else:
+        await _send_tiered_announcement(game_day_id, tier)
+        labels = {"high": "🟢 Братья", "mid": "🟡 Друзья", "low": "🔴 Гости"}
+        await call.message.answer(f"✅ Анонс отправлен: {labels[tier]}.")
 
 
 # ---------- Закрыть запись ----------
