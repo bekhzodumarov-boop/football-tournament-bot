@@ -807,8 +807,30 @@ async def _finish_create_league(msg, state: FSMContext, session: AsyncSession,
     )
     creator = p_res.scalar_one_or_none()
     if creator:
+        # Сохранить членство в старой лиге перед переключением
+        if creator.league_id and creator.league_id != league.id:
+            old_pl_res = await session.execute(
+                select(PlayerLeague).where(
+                    PlayerLeague.player_id == creator.id,
+                    PlayerLeague.league_id == creator.league_id,
+                )
+            )
+            if old_pl_res.scalar_one_or_none() is None:
+                old_league = await session.get(League, creator.league_id)
+                if old_league:
+                    old_role = (
+                        LeagueRole.ADMIN
+                        if old_league.admin_telegram_id == creator.telegram_id
+                        else LeagueRole.PLAYER
+                    )
+                    session.add(PlayerLeague(
+                        player_id=creator.id,
+                        league_id=creator.league_id,
+                        role=old_role,
+                    ))
+
         creator.league_id = league.id
-        # Создать PlayerLeague с ролью ADMIN
+        # Создать PlayerLeague с ролью ADMIN для новой лиги
         existing_pl = await session.execute(
             select(PlayerLeague).where(
                 PlayerLeague.player_id == creator.id,

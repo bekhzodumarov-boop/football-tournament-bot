@@ -271,30 +271,49 @@ async def _migrate_player_leagues() -> None:
         leagues = {lg.id: lg for lg in leagues_result.scalars().all()}
 
         for player in players:
-            # Проверить, нет ли уже записи
+            # Текущая лига
+            league = leagues.get(player.league_id)
+            if league:
+                existing = await session.execute(
+                    select(PlayerLeague).where(
+                        PlayerLeague.player_id == player.id,
+                        PlayerLeague.league_id == player.league_id,
+                    )
+                )
+                if existing.scalar_one_or_none() is None:
+                    role = (
+                        LeagueRole.ADMIN
+                        if league.admin_telegram_id == player.telegram_id
+                        else LeagueRole.PLAYER
+                    )
+                    session.add(PlayerLeague(
+                        player_id=player.id,
+                        league_id=player.league_id,
+                        role=role,
+                    ))
+
+        # Восстановить членство в лигах где игрок числится admin по admin_telegram_id
+        for league in leagues.values():
+            if not league.admin_telegram_id:
+                continue
+            admin_res = await session.execute(
+                select(Player).where(Player.telegram_id == league.admin_telegram_id)
+            )
+            admin_player = admin_res.scalar_one_or_none()
+            if not admin_player:
+                continue
             existing = await session.execute(
                 select(PlayerLeague).where(
-                    PlayerLeague.player_id == player.id,
-                    PlayerLeague.league_id == player.league_id,
+                    PlayerLeague.player_id == admin_player.id,
+                    PlayerLeague.league_id == league.id,
                 )
             )
-            if existing.scalar_one_or_none() is not None:
-                continue
-
-            league = leagues.get(player.league_id)
-            if not league:
-                continue
-
-            role = (
-                LeagueRole.ADMIN
-                if league.admin_telegram_id == player.telegram_id
-                else LeagueRole.PLAYER
-            )
-            session.add(PlayerLeague(
-                player_id=player.id,
-                league_id=player.league_id,
-                role=role,
-            ))
+            if existing.scalar_one_or_none() is None:
+                session.add(PlayerLeague(
+                    player_id=admin_player.id,
+                    league_id=league.id,
+                    role=LeagueRole.ADMIN,
+                ))
 
         await session.commit()
 
