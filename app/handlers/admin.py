@@ -191,7 +191,7 @@ async def gd_reg_times(call: CallbackQuery, session: AsyncSession):
         p = att.player
         if not p:
             continue
-        time_str = att.responded_at.strftime("%H:%M") if att.responded_at else "—"
+        time_str = att.responded_at.strftime("%d.%m %H:%M") if att.responded_at else "—"
         lines.append(f"{i}. <b>{p.name}</b> — {time_str}")
 
     waitlist_res = await session.execute(
@@ -208,7 +208,7 @@ async def gd_reg_times(call: CallbackQuery, session: AsyncSession):
             p = att.player
             if not p:
                 continue
-            time_str = att.responded_at.strftime("%H:%M") if att.responded_at else "—"
+            time_str = att.responded_at.strftime("%d.%m %H:%M") if att.responded_at else "—"
             lines.append(f"{i}. {p.name} — {time_str}")
 
     back_kb = InlineKeyboardMarkup(inline_keyboard=[[
