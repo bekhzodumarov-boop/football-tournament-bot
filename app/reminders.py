@@ -394,11 +394,33 @@ def schedule_reminders(game_day: GameDay) -> None:
         )
 
 
+async def auto_finish_past_games() -> None:
+    """
+    Завершить все игры, дата которых уже прошла, но статус ещё ANNOUNCED/CLOSED.
+    Вызывается при старте и раз в час через APScheduler.
+    """
+    now = datetime.now()
+    async with AsyncSessionFactory() as session:
+        result = await session.execute(
+            select(GameDay).where(
+                GameDay.status.in_([GameDayStatus.ANNOUNCED, GameDayStatus.CLOSED]),
+                GameDay.scheduled_at < now,
+            )
+        )
+        past = result.scalars().all()
+        for gd in past:
+            gd.status = GameDayStatus.FINISHED
+        if past:
+            await session.commit()
+
+
 async def reschedule_all_reminders() -> None:
     """
     При старте бота — восстановить напоминания и анонсы для всех предстоящих игровых дней.
     APScheduler не сохраняет jobs между рестартами (MemoryJobStore).
     """
+    await auto_finish_past_games()
+
     now = datetime.now()
     async with AsyncSessionFactory() as session:
         result = await session.execute(
@@ -419,3 +441,12 @@ async def reschedule_all_reminders() -> None:
                 if now >= open_high:
                     gd.registration_open = True
         await session.commit()
+
+    # Периодическое авто-завершение раз в час
+    scheduler.add_job(
+        auto_finish_past_games,
+        trigger="interval",
+        hours=1,
+        id="auto_finish_past_games",
+        replace_existing=True,
+    )
